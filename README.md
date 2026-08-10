@@ -26,7 +26,7 @@ and head pose. Hand input sits behind `RAVEHandInputProvider`, which returns
 | Target | Status | Purpose |
 |---|---|---|
 | `RAVEInput` | shipping | Hand and controller sensing, pinch/joystick/palm geometry, binding tables |
-| `RAVEDiagnostics` | planned | Frame profiler + HUD, three presentation modes |
+| `RAVEDiagnostics` | shipping | Frame profiler, metric collector, feed gating, HUD views |
 | `RAVEPCVR` | planned | Controller-bridge protocol, sourced from Longwave |
 
 ## RAVEInput
@@ -77,5 +77,5 @@ fed anchors an app already receives (`ingest(_:)`).
 
 ```bash
 swift test                                                                 # pure-logic targets, on the host
-xcodebuild -scheme RAVEEngine -sdk xros -destination 'generic/platform=visionOS' build
+xcodebuild -scheme RAVEEngine-Package -sdk xros -destination 'generic/platform=visionOS' build
 ```
