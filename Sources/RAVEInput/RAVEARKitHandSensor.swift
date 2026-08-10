@@ -204,12 +204,17 @@ public final class RAVEARKitHandSensor: RAVEHandInputProvider {
 
     // MARK: Per-frame
 
-    /// Advance both hands and the joystick.
+    /// Advance both hands and the joystick, reporting everything sensed.
+    ///
+    /// Named apart from the `tick` protocol witness deliberately: a defaulted
+    /// `now:` would otherwise make the two indistinguishable at the call site,
+    /// and silently picking the lossy one is exactly the kind of mistake this
+    /// package exists to stop.
     ///
     /// - Parameter now: monotonic seconds. Injectable so the state machine can
     ///   be driven deterministically in a test.
     @discardableResult
-    public func tick(
+    public func poll(
         now: TimeInterval = CACurrentMediaTime(),
         worldForward: SIMD3<Float>,
         worldRight: SIMD3<Float>
@@ -232,7 +237,7 @@ public final class RAVEARKitHandSensor: RAVEHandInputProvider {
 
     /// `RAVEHandInputProvider` witness — the additive-input view, on the media clock.
     public func tick(worldForward: SIMD3<Float>, worldRight: SIMD3<Float>) -> RAVEHandInputFrame {
-        tick(now: CACurrentMediaTime(), worldForward: worldForward, worldRight: worldRight)
+        poll(now: CACurrentMediaTime(), worldForward: worldForward, worldRight: worldRight)
             .inputFrame
     }
 
