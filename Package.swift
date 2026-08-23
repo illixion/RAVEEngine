@@ -8,7 +8,12 @@ let package = Package(
     // can run it on the host, and the Engine's stated future is a Mac port.
     // ARKit-backed files guard with `#if os(visionOS)` rather than forcing the
     // whole package to one platform.
-    platforms: [.visionOS(.v26), .macOS(.v14)],
+    //
+    // iOS is declared because an omitted platform is not an excluded one: it
+    // gets SwiftPM's own default floor instead, and RAVEDiagnostics then fails
+    // to build for an iOS client on `OSSignposter` (iOS 15) and SwiftUI
+    // (iOS 13) — floors nothing here has ever targeted.
+    platforms: [.visionOS(.v26), .macOS(.v14), .iOS(.v26)],
     products: [
         .library(name: "RAVEInput", targets: ["RAVEInput"]),
         .library(name: "RAVEDiagnostics", targets: ["RAVEDiagnostics"]),
