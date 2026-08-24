@@ -73,6 +73,37 @@ requirement, since two of the three consumers run off the main actor.
 ownership models: it can open its own `HandTrackingProvider` (`start()`) or be
 fed anchors an app already receives (`ingest(_:)`).
 
+## Consuming this package
+
+The visionOS apps link this package as a **local** Swift package — an Xcode
+`XCLocalSwiftPackageReference` with a relative path, not a versioned remote
+dependency. There are no tags and no `Package.resolved` entry; a build always
+compiles the working copy you have checked out.
+
+That is deliberate. The packages and the apps co-evolve continuously — `RAVEInput`
+arrived here by being converged out of three apps that had each already shipped a
+copy of it — and a path reference makes "move this code into the package and
+update its callers" one atomic edit instead of a commit, a tag, and a pin bump in
+every app.
+
+The cost is a layout convention. Clone this package as a **sibling** of any app
+that uses it:
+
+```
+some-parent/
+├── RAVEEngine/       <- this package
+├── RAVESDK/          <- its sibling package
+├── Spatialcraft/
+└── Longwave/
+```
+
+Each app's project points at `../RAVEEngine` or `../../RAVEEngine` depending on
+how deeply its `.xcodeproj` is nested; both resolve to the same parent directory,
+so the only requirement is that the app repo's parent also contains `RAVEEngine`
+(and `RAVESDK`, for an app that links it) under exactly those directory names.
+The app repo's own directory name does not matter. Get it wrong and Xcode fails
+at package resolution rather than at compile time.
+
 ## Testing
 
 ```bash
