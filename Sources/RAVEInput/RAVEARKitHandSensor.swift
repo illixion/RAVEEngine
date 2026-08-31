@@ -101,7 +101,11 @@ public struct RAVEHandTickOutput: Sendable {
 
     /// The additive-input view of this frame.
     public var inputFrame: RAVEHandInputFrame {
-        RAVEHandInputFrame(pinchEvents: pinchEvents, joystick: joystick.vector)
+        RAVEHandInputFrame(
+            pinchEvents: pinchEvents,
+            joystick: joystick.vector,
+            joystickVisualization: joystick.visualization
+        )
     }
 }
 
@@ -183,12 +187,16 @@ public final class RAVEARKitHandSensor: RAVEHandInputProvider {
         }
     }
 
-    /// Stop consuming anchors. Only meaningful after `start()`; harmless
-    /// otherwise. Held pinches release on the next `tick` once samples stop
-    /// arriving and the anchors go untracked.
+    /// Stop consuming anchors and immediately clear every held input. Only
+    /// meaningful after `start()`; harmless otherwise.
     public func stop() {
         anchorTask?.cancel()
         anchorTask = nil
+        leftSample = nil
+        rightSample = nil
+        leftDetector.reset()
+        rightDetector.reset()
+        joystick.release()
     }
 
     /// Push in an anchor observed elsewhere. An untracked anchor clears that
@@ -219,6 +227,19 @@ public final class RAVEARKitHandSensor: RAVEHandInputProvider {
         worldForward: SIMD3<Float>,
         worldRight: SIMD3<Float>
     ) -> RAVEHandTickOutput {
+        poll(
+            now: now,
+            trackingBasis: RAVEPlanarBasis(forward: worldForward, right: worldRight)
+        )
+    }
+
+    /// Advance both hands with axes explicitly identified as sharing the hand
+    /// samples' ARKit tracking space.
+    @discardableResult
+    public func poll(
+        now: TimeInterval = CACurrentMediaTime(),
+        trackingBasis: RAVEPlanarBasis
+    ) -> RAVEHandTickOutput {
         let left = leftDetector.update(sample: input(for: .left), now: now)
         let right = rightDetector.update(sample: input(for: .right), now: now)
 
@@ -226,10 +247,9 @@ public final class RAVEARKitHandSensor: RAVEHandInputProvider {
         let engaged = driving.held == joystickFinger
         let wrist = (joystickChirality == .left ? leftSample : rightSample)?.wrist
         let stick = joystick.update(
-            wristWorld: wrist,
+            controlPoint: wrist,
             engaged: engaged,
-            worldForward: worldForward,
-            worldRight: worldRight
+            basis: trackingBasis
         )
 
         return RAVEHandTickOutput(left: left, right: right, joystick: stick)
@@ -237,7 +257,10 @@ public final class RAVEARKitHandSensor: RAVEHandInputProvider {
 
     /// `RAVEHandInputProvider` witness — the additive-input view, on the media clock.
     public func tick(worldForward: SIMD3<Float>, worldRight: SIMD3<Float>) -> RAVEHandInputFrame {
-        poll(now: CACurrentMediaTime(), worldForward: worldForward, worldRight: worldRight)
+        poll(
+            now: CACurrentMediaTime(),
+            trackingBasis: RAVEPlanarBasis(forward: worldForward, right: worldRight)
+        )
             .inputFrame
     }
 

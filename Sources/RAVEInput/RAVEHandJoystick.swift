@@ -8,34 +8,121 @@
 
  All three apps implemented this identically apart from Lambda's deadzone (which
  stops a perfectly still pinch from creeping) and Lambda's use of the raw vertical
- delta for jump/duck. Both are parameters here rather than forks.
+ delta for jump/duck. The deadzone is now the shared default: ARKit wrist jitter is
+ input noise, not a product choice.
 
  Head-relative rather than world-relative is the load-bearing detail: it means the
  joystick survives snap turns and a rotating vehicle, because "forward" is
  re-read from the head basis every frame instead of being baked into the anchor.
+
+ The control point and basis MUST be expressed in the same coordinate space.
+ `RAVEPlanarBasis` makes that contract explicit and repairs skewed or degenerate
+ axes before projection. The output also carries renderer-neutral visualization
+ geometry, so RealityKit, Metal and remote-controller consumers can each draw the
+ same stick without the input package depending on any renderer.
  */
 
 import simd
+
+/// A validated horizontal basis in a caller-defined tracking coordinate space.
+///
+/// `forward` and `right` are always finite, unit length and orthogonal. The
+/// initializer treats Y as up and derives the canonical right axis from
+/// forward. The supplied right axis is only a fallback when forward has no
+/// usable horizontal component.
+public struct RAVEPlanarBasis: Sendable, Equatable {
+    public var forward: SIMD3<Float>
+    public var right: SIMD3<Float>
+
+    public init(
+        forward: SIMD3<Float>,
+        right: SIMD3<Float>,
+        fallbackForward: SIMD3<Float> = SIMD3(0, 0, -1)
+    ) {
+        if let unitForward = Self.horizontalUnit(forward) {
+            self.forward = unitForward
+            self.right = Self.rightAxis(for: unitForward)
+        } else if let unitRight = Self.horizontalUnit(right) {
+            self.right = unitRight
+            self.forward = SIMD3(unitRight.z, 0, -unitRight.x)
+        } else if let fallback = Self.horizontalUnit(fallbackForward) {
+            self.forward = fallback
+            self.right = Self.rightAxis(for: fallback)
+        } else {
+            self.forward = SIMD3(0, 0, -1)
+            self.right = SIMD3(1, 0, 0)
+        }
+    }
+
+    private static func horizontalUnit(_ value: SIMD3<Float>) -> SIMD3<Float>? {
+        guard value.x.isFinite, value.z.isFinite else { return nil }
+        let horizontal = SIMD3<Float>(value.x, 0, value.z)
+        let length = simd_length(horizontal)
+        guard length > 1e-5, length.isFinite else { return nil }
+        return horizontal / length
+    }
+
+    private static func rightAxis(for forward: SIMD3<Float>) -> SIMD3<Float> {
+        SIMD3(-forward.z, 0, forward.x)
+    }
+}
+
+/// Renderer-neutral geometry for drawing a virtual joystick.
+///
+/// Every position and axis uses the same tracking space as the control point
+/// passed to `RAVEHandJoystick.update(controlPoint:engaged:basis:)`.
+public struct RAVEJoystickVisualization: Sendable, Equatable {
+    /// Center of the joystick ring.
+    public var center: SIMD3<Float>
+    /// Handle position projected onto the joystick plane and clamped to the
+    /// full-scale ring.
+    public var handle: SIMD3<Float>
+    public var basis: RAVEPlanarBasis
+    public var deadzoneMeters: Float
+    public var fullScaleMeters: Float
+    /// The actual movement value after deadzone removal and response scaling.
+    public var value: SIMD2<Float>
+
+    public init(
+        center: SIMD3<Float>,
+        handle: SIMD3<Float>,
+        basis: RAVEPlanarBasis,
+        deadzoneMeters: Float,
+        fullScaleMeters: Float,
+        value: SIMD2<Float>
+    ) {
+        self.center = center
+        self.handle = handle
+        self.basis = basis
+        self.deadzoneMeters = deadzoneMeters
+        self.fullScaleMeters = fullScaleMeters
+        self.value = value
+    }
+}
 
 /// The joystick's reading for one frame.
 public struct RAVEJoystickOutput: Sendable, Equatable {
     /// Head-relative (x = strafe, y = forward), magnitude clamped to 1.
     public var vector: SIMD2<Float>
-    /// Raw world-space wrist displacement from the anchor. Vertical gestures
-    /// (jump / duck) read `delta.y`; the horizontal part is already folded into
-    /// `vector`.
+    /// Raw tracking-space control-point displacement from the anchor. Vertical
+    /// gestures (jump / duck) read `delta.y`; the horizontal part is already
+    /// folded into `vector`.
     public var delta: SIMD3<Float>
     /// True while an anchor is held.
     public var isEngaged: Bool
+    /// Geometry an app can use to draw the stick. `nil` while disengaged.
+    public var visualization: RAVEJoystickVisualization?
 
     public init(
         vector: SIMD2<Float> = .zero,
         delta: SIMD3<Float> = .zero,
-        isEngaged: Bool = false
+        isEngaged: Bool = false,
+        visualization: RAVEJoystickVisualization? = nil
     ) {
         self.vector = vector
         self.delta = delta
         self.isEngaged = isEngaged
+        self.visualization = visualization
     }
 }
 
@@ -49,72 +136,98 @@ public struct RAVEHandJoystick: Sendable {
     /// only thing stopping drift).
     public var deadzoneMeters: Float
 
-    /// Where the wrist was when the current hold began. `nil` when disengaged.
-    public private(set) var anchorWorld: SIMD3<Float>?
+    /// Where the wrist was when the current hold began, in the caller's
+    /// tracking space. `nil` when disengaged.
+    public private(set) var anchor: SIMD3<Float>?
 
-    public init(fullScaleMeters: Float = 0.18, deadzoneMeters: Float = 0) {
+    /// Compatibility spelling from the original world-space-only API.
+    @available(*, deprecated, renamed: "anchor")
+    public var anchorWorld: SIMD3<Float>? { anchor }
+
+    public init(fullScaleMeters: Float = 0.18, deadzoneMeters: Float = 0.03) {
         self.fullScaleMeters = fullScaleMeters
         self.deadzoneMeters = deadzoneMeters
     }
 
     /// Drop the anchor without producing a reading.
     public mutating func release() {
-        anchorWorld = nil
+        anchor = nil
     }
 
     /// Advance one frame.
     ///
     /// - Parameters:
-    ///   - wristWorld: current wrist position, world space.
+    ///   - controlPoint: current wrist position in the caller's tracking space.
     ///   - engaged: whether the gating pinch is held this frame. `false` drops
     ///     the anchor and returns a zero reading.
-    ///   - worldForward/worldRight: the player's head-relative basis in world
-    ///     space. Flattened to horizontal here, so callers may pass the raw
-    ///     head axes.
+    ///   - basis: the player's head-relative axes in the SAME tracking space as
+    ///     `controlPoint`.
+    @discardableResult
+    public mutating func update(
+        controlPoint: SIMD3<Float>?,
+        engaged: Bool,
+        basis: RAVEPlanarBasis
+    ) -> RAVEJoystickOutput {
+        guard engaged,
+              let controlPoint,
+              controlPoint.x.isFinite,
+              controlPoint.y.isFinite,
+              controlPoint.z.isFinite
+        else {
+            anchor = nil
+            return RAVEJoystickOutput()
+        }
+
+        if anchor == nil { anchor = controlPoint }
+        let center = anchor ?? controlPoint
+        let delta = controlPoint - center
+        let strafe = simd_dot(delta, basis.right)
+        let advance = simd_dot(delta, basis.forward)
+        let planar = SIMD2(strafe, advance)
+        let distance = simd_length(planar)
+        let fullScale = max(fullScaleMeters.isFinite ? fullScaleMeters : 0, 1e-4)
+        let deadzone = min(max(deadzoneMeters.isFinite ? deadzoneMeters : 0, 0), fullScale)
+
+        let handleDistance = min(distance, fullScale)
+        let handleOffset = distance > 1e-6 ? planar * (handleDistance / distance) : .zero
+        let vector: SIMD2<Float>
+        if distance > deadzone {
+            let activeRange = max(fullScale - deadzone, 1e-4)
+            let outputMagnitude = min(1, (distance - deadzone) / activeRange)
+            vector = planar / distance * outputMagnitude
+        } else {
+            vector = .zero
+        }
+
+        let visualization = RAVEJoystickVisualization(
+            center: center,
+            handle: center + basis.right * handleOffset.x + basis.forward * handleOffset.y,
+            basis: basis,
+            deadzoneMeters: deadzone,
+            fullScaleMeters: fullScale,
+            value: vector
+        )
+        return RAVEJoystickOutput(
+            vector: vector,
+            delta: delta,
+            isEngaged: true,
+            visualization: visualization
+        )
+    }
+
+    /// Compatibility overload. Prefer the basis-taking form because its labels
+    /// make the same-coordinate-space requirement visible at the call site.
+    @discardableResult
     public mutating func update(
         wristWorld: SIMD3<Float>?,
         engaged: Bool,
         worldForward: SIMD3<Float>,
         worldRight: SIMD3<Float>
     ) -> RAVEJoystickOutput {
-        guard engaged, let wristWorld else {
-            anchorWorld = nil
-            return RAVEJoystickOutput()
-        }
-
-        if anchorWorld == nil { anchorWorld = wristWorld }
-        let delta = wristWorld - (anchorWorld ?? wristWorld)
-
-        // Flatten the head basis, then RE-NORMALIZE. Two of the three ported
-        // copies projected onto the raw flattened axes, which shortens them
-        // whenever the head is pitched — so looking down at your hand, which is
-        // exactly what you do while using a wrist joystick, quietly reduced
-        // forward sensitivity. Lambda's copy normalized and was right to.
-        let forward = Self.flattenedUnit(worldForward, fallback: SIMD3(0, 0, -1))
-        let right = Self.flattenedUnit(worldRight, fallback: SIMD3(1, 0, 0))
-        let strafe = simd_dot(delta, right)
-        let advance = simd_dot(delta, forward)
-
-        guard (strafe * strafe + advance * advance).squareRoot() > deadzoneMeters else {
-            return RAVEJoystickOutput(vector: .zero, delta: delta, isEngaged: true)
-        }
-
-        let scale = 1 / fullScaleMeters
-        var x = strafe * scale
-        var y = advance * scale
-        let magnitude = (x * x + y * y).squareRoot()
-        if magnitude > 1 {
-            x /= magnitude
-            y /= magnitude
-        }
-        return RAVEJoystickOutput(vector: SIMD2(x, y), delta: delta, isEngaged: true)
-    }
-
-    /// Horizontal component of `v`, normalized. Falls back when the axis points
-    /// straight up or down and so has no horizontal part to speak of.
-    static func flattenedUnit(_ v: SIMD3<Float>, fallback: SIMD3<Float>) -> SIMD3<Float> {
-        let flat = SIMD3<Float>(v.x, 0, v.z)
-        let length = simd_length(flat)
-        return length > 1e-5 ? flat / length : fallback
+        update(
+            controlPoint: wristWorld,
+            engaged: engaged,
+            basis: RAVEPlanarBasis(forward: worldForward, right: worldRight)
+        )
     }
 }

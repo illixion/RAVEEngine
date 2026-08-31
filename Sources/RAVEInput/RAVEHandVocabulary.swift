@@ -60,10 +60,18 @@ public struct RAVEHandInputFrame: Sendable {
     /// Head-relative (x = strafe, y = forward) movement vector, magnitude
     /// clamped to 1. Zero unless a sustained joystick pinch is held.
     public var joystick: SIMD2<Float>
+    /// Renderer-neutral stick geometry. A consumer may ignore this, or draw it
+    /// using RealityKit, Metal, SwiftUI, a remote HUD, or another presentation.
+    public var joystickVisualization: RAVEJoystickVisualization?
 
-    public init(pinchEvents: [RAVEHandPinchEvent] = [], joystick: SIMD2<Float> = .zero) {
+    public init(
+        pinchEvents: [RAVEHandPinchEvent] = [],
+        joystick: SIMD2<Float> = .zero,
+        joystickVisualization: RAVEJoystickVisualization? = nil
+    ) {
         self.pinchEvents = pinchEvents
         self.joystick = joystick
+        self.joystickVisualization = joystickVisualization
     }
 }
 

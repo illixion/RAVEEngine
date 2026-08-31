@@ -73,6 +73,40 @@ requirement, since two of the three consumers run off the main actor.
 ownership models: it can open its own `HandTrackingProvider` (`start()`) or be
 fed anchors an app already receives (`ingest(_:)`).
 
+### Joystick coordinate contract and visualization
+
+`RAVEHandJoystick` takes a control point and a `RAVEPlanarBasis` expressed in
+the same tracking coordinate space. The basis validates and orthogonalizes the
+horizontal axes before projection, preventing a consumer from accidentally
+mixing ARKit hand positions with a separately rotated game-world basis.
+
+The shared defaults use a 3 cm radial deadzone and remap the remaining travel
+to the full output range. `RAVEJoystickOutput.visualization` publishes the
+center, clamped handle, axes and ring radii as plain SIMD values. Each app can
+draw those values with RealityKit, Metal, SwiftUI, or a remote HUD without
+putting renderer dependencies in `RAVEInput`.
+
+```swift
+let trackingBasis = RAVEPlanarBasis(
+    forward: deviceForwardInARKit,
+    right: deviceRightInARKit
+)
+let frame = handInput.tick(trackingBasis: trackingBasis)
+
+moveInput += frame.joystick
+if let stick = frame.joystickVisualization {
+    joystickOverlay.update(
+        center: stick.center,
+        handle: stick.handle,
+        forward: stick.basis.forward,
+        right: stick.basis.right,
+        deadzone: stick.deadzoneMeters,
+        radius: stick.fullScaleMeters,
+        value: stick.value
+    )
+}
+```
+
 ## Consuming this package
 
 The visionOS apps link this package as a **local** Swift package — an Xcode

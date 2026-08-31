@@ -31,6 +31,16 @@ public protocol RAVEHandInputProvider: AnyObject {
 }
 
 public extension RAVEHandInputProvider {
+    /// Process the latest hand data using an explicitly named tracking-space
+    /// basis. Prefer this at call sites that already construct
+    /// `RAVEPlanarBasis`; it makes coordinate-space mistakes harder to hide.
+    func tick(trackingBasis: RAVEPlanarBasis) -> RAVEHandInputFrame {
+        tick(
+            worldForward: trackingBasis.forward,
+            worldRight: trackingBasis.right
+        )
+    }
+
     /// How directly a palm faces `target` — plain dot product, so the palm must
     /// actually point at it. See `RAVEPalmGeometry` on choosing between this and
     /// the pitch-invariant variant.

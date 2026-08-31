@@ -100,6 +100,17 @@ and do not transfer to the plain one. This divergence is a product decision, not
 purpose: a defaulted `now:` made them indistinguishable at the call site and overload
 resolution silently picked the lossy one.
 
+**Joystick positions and axes use one tracking space.** `RAVEHandJoystick` accepts a
+`RAVEPlanarBasis` so that contract is visible at direct call sites; the compatibility
+overload and `RAVEARKitHandSensor` construct it for older callers. Do not project an ARKit
+hand position against a game-world basis that has already had the game's yaw applied.
+The output is head-relative and the game may rotate that 2D value into its world afterward.
+
+The shared default deadzone is 3 cm. Zero made normal ARKit wrist jitter into movement in
+the two consumers that did not override it; Lambda's long-standing 3 cm setting was the
+proven behavior. `RAVEJoystickOutput.visualization` is the renderer-neutral overlay seam —
+keep it plain SIMD data rather than importing RealityKit or a Metal renderer here.
+
 **`RAVEFingerBindingTable`'s `Codable` is hand-written and wire-compatible.** It emits the
 same named fields (`rightIndex`, `rightMiddle`, …) two apps already have in `UserDefaults`,
 and decodes `leftIndex` with `decodeIfPresent` because one app never stored it — its
