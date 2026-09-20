@@ -17,11 +17,19 @@ let package = Package(
     products: [
         .library(name: "RAVEInput", targets: ["RAVEInput"]),
         .library(name: "RAVEDiagnostics", targets: ["RAVEDiagnostics"]),
+        .library(name: "RAVERig", targets: ["RAVERig"]),
     ],
     targets: [
         .target(name: "RAVEInput"),
         .testTarget(name: "RAVEInputTests", dependencies: ["RAVEInput"]),
         .target(name: "RAVEDiagnostics"),
         .testTarget(name: "RAVEDiagnosticsTests", dependencies: ["RAVEDiagnostics"]),
+        // Skeleton geometry and IK. Framework-free like the sensing core, and
+        // for a sharper reason: its two consumers share nothing but the maths.
+        // One drives a RealityKit SkeletalPose, the other a GoldSrc bone
+        // palette bound for a Metal vertex shader, so anything that cannot be
+        // written without naming a framework belongs in that app's adapter.
+        .target(name: "RAVERig"),
+        .testTarget(name: "RAVERigTests", dependencies: ["RAVERig"]),
     ]
 )

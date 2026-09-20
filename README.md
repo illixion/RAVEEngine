@@ -27,6 +27,7 @@ and head pose. Hand input sits behind `RAVEHandInputProvider`, which returns
 |---|---|---|
 | `RAVEInput` | shipping | Hand and controller sensing, pinch/joystick/palm geometry, binding tables |
 | `RAVEDiagnostics` | shipping | Frame profiler, metric collector, feed gating, HUD views |
+| `RAVERig` | shipping | Skeleton geometry, humanoid inference, FABRIK, pose solving, leg stepping |
 | `RAVEPCVR` | planned | Controller-bridge protocol, sourced from Longwave |
 
 ## RAVEInput
@@ -106,6 +107,56 @@ if let stick = frame.joystickVisualization {
     )
 }
 ```
+
+## RAVERig
+
+Skeleton geometry and inverse kinematics. Converged the same way `RAVEInput`
+was — it grew inside `spatial-ai-character` as part of a character-import
+pipeline, and became a package when `halflife-visionos` needed the same solver
+to pose a Half-Life player model from a tracked head and hands.
+
+| | |
+|---|---|
+| `RigSkeleton` | A skeleton as a flat, parent-indexed joint list in Y-up metres. The input to every analysis here. |
+| `HumanoidInference` | Works out which joints are the hips, spine, head, arms and legs, from topology and skin weights rather than from names. |
+| `LegArchitecture` | Classifies a leg as plantigrade or digitigrade and finds its true ground contact — measured from where the joints sit, not from what they are called. |
+| `FABRIK` | Forward And Backward Reaching IK over a chain of points, with a pole constraint and reach/fold limits. Any number of segments. |
+| `PoseSolver` | Turns a FABRIK solution back into joint rotations, which is what a skeleton actually stores. |
+| `LegStepper` | Plans footfalls — where each foot plants, when it lifts, the arc it swings through. |
+| `BindPoseCheck` | Validates a rig before anything downstream trusts it. |
+
+### The two halves of a solve are deliberately separate
+
+`FABRIK` knows nothing about skeletons and returns bare points: *where should
+each joint sit*. A skinned character needs *how far should each joint turn*,
+because that is what a bone palette or a `SkeletalPose` stores, and the
+conversion is where the subtleties are — accumulated parent transforms, the
+change of basis into a parent's space, and rotations that are undefined exactly
+when a limb straightens out. `PoseSolver` is that conversion and nothing else.
+Callers compose the two.
+
+### It solves in whatever space you hand it
+
+Nothing here assumes an up axis or a unit. `spatial-ai-character` solves in
+RealityKit's Y-up metres; `halflife-visionos` solves in GoldSrc's Z-up inches
+so its bone palette reaches the vertex shader without an axis conversion
+sitting between the tracker and the bones.
+
+### Both stops are guarded, and reported
+
+A chain is slow to converge wherever it is close to a straight line, which
+happens at *both* ends: pulled taut, and folded back on itself. `reachLimit`
+and `foldLimit` keep the aim off each, and `extended` / `outOfReach` /
+`folded` report which stop was hit, so a limb that is always straining stays
+visible instead of being quietly absorbed. Measured on a Half-Life arm (11.59 +
+10.13 units): 32 iterations hold a fortieth of a millimetre everywhere the
+limits leave in play.
+
+A chain that already lies along the line to its target is a third case and a
+real trap — it has no bend plane, so it can only collapse or extend and flips
+between the two once per iteration. A standing leg reaching for the ground
+beneath it is exactly that shape. The solver nudges an interior joint off the
+line first; the pole, when given, decides which way.
 
 ## Consuming this package
 
