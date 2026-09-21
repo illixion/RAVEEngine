@@ -39,6 +39,10 @@ public struct ChainDynamics: Sendable, Equatable {
         /// Integration step. The spring is stable while
         /// `stiffness * substep²` stays well under one.
         public var substep: Float = 1.0 / 120
+        /// Radius of the chain itself, so a hand meets its surface rather
+        /// than its centreline. One value along the whole length; the
+        /// Synth's tail tapers, and this sits between its base and its tip.
+        public var thickness: Float = 0.035
         /// A base moved further than this in one frame was teleported, and
         /// the chain is put down where it now is rather than whipped across
         /// the room to catch up.
@@ -136,23 +140,54 @@ public struct ChainDynamics: Sendable, Equatable {
                     }
                     positions[i] = positions[i - 1] + direction * lengths[i - 1]
                     if let floor, positions[i].y < floor { positions[i].y = floor }
+                    // The whole segment is solid, not just its ends: the
+                    // joints sit a hand's breadth apart, and a fingertip
+                    // between two of them has to meet something. The
+                    // segment is a capsule of the chain's thickness; the
+                    // push lands on its two ends in proportion to where
+                    // along it the hand is, and never on the pinned base.
                     for sphere in obstacles {
-                        let away = positions[i] - sphere.center
+                        let a = positions[i - 1], b = positions[i]
+                        let (closest, t) = Self.closestPoint(on: a, b, to: sphere.center)
+                        let away = closest - sphere.center
                         let distance = simd_length(away)
-                        guard distance < sphere.radius else { continue }
-                        // A particle dead on the centre has no way out; send
+                        let reach = sphere.radius + settings.thickness
+                        guard distance < reach else { continue }
+                        // A segment dead on the centre has no way out; send
                         // it up, which for a hand under a tail is right.
                         let outward = distance > 1e-5 ? away / distance : SIMD3<Float>(0, 1, 0)
-                        positions[i] = sphere.center + outward * sphere.radius
+                        let push = outward * (reach - distance)
+                        if i - 1 > 0 {
+                            positions[i - 1] += push * (1 - t)
+                            positions[i] += push * t
+                        } else {
+                            positions[i] += push
+                        }
                     }
                 }
             }
         }
     }
 
-    /// Whether any particle is inside one of `obstacles`, for diagnostics.
+    /// Whether any segment is inside one of `obstacles`, for diagnostics.
     public func touches(_ obstacles: [Sphere]) -> Bool {
-        positions.contains { p in obstacles.contains { simd_distance(p, $0.center) < $0.radius - 1e-4 } }
+        for i in 1..<positions.count {
+            for sphere in obstacles {
+                let (closest, _) = Self.closestPoint(on: positions[i - 1], positions[i], to: sphere.center)
+                if simd_distance(closest, sphere.center) < sphere.radius + settings.thickness - 1e-4 { return true }
+            }
+        }
+        return false
+    }
+
+    /// The point on segment `a`–`b` nearest `point`, and how far along it lies.
+    static func closestPoint(on a: SIMD3<Float>, _ b: SIMD3<Float>,
+                             to point: SIMD3<Float>) -> (SIMD3<Float>, Float) {
+        let ab = b - a
+        let length = simd_length_squared(ab)
+        guard length > 1e-10 else { return (a, 0) }
+        let t = simd_clamp(simd_dot(point - a, ab) / length, 0, 1)
+        return (a + ab * t, t)
     }
 
     /// `direction`, rotated toward `along` until they are within `maxBend`.

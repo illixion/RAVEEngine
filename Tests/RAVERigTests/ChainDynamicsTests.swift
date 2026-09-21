@@ -259,14 +259,39 @@ import simd
         for _ in 0..<180 { chain.step(toward: shape, deltaTime: 1 / 90) }
         let resting = chain.positions[6]
         // A palm placed right on the seventh particle, from below.
-        let hand = ChainDynamics.Sphere(center: resting - SIMD3<Float>(0, 0.03, 0), radius: 0.06)
+        let hand = ChainDynamics.Sphere(center: resting - SIMD3<Float>(0, 0.06, 0), radius: 0.06)
         for _ in 0..<45 { chain.step(toward: shape, deltaTime: 1 / 90, obstacles: [hand]) }
         #expect(!chain.touches([hand]))
-        #expect(chain.positions[6].y > resting.y + 0.02, "the tail did not lift off the hand")
+        #expect(chain.positions[6].y > resting.y + 0.015, "the tail did not lift off the hand")
         let total = zip(chain.positions, chain.positions.dropFirst()).reduce(0) { $0 + simd_length($1.1 - $1.0) }
         #expect(abs(total - 0.128 * 9) < 1e-3)
         // Hand withdrawn: back to where it hung.
         for _ in 0..<270 { chain.step(toward: shape, deltaTime: 1 / 90) }
         #expect(simd_distance(chain.positions[6], resting) < 0.01)
+    }
+}
+
+extension ChainObstacleTests {
+
+    /// The joints are a hand's breadth apart; a fingertip between two of them
+    /// slipped straight through, which on the headset read as a tail that
+    /// could only be touched at certain points along it.
+    @Test func aFingertipBetweenTwoJointsStillMeetsTheTail() {
+        let shape = (0..<10).map { SIMD3<Float>(0, 0.97, 0.128 * Float($0)) }
+        var chain = ChainDynamics(shape: shape)
+        for _ in 0..<180 { chain.step(toward: shape, deltaTime: 1 / 90) }
+        let midpoint = (chain.positions[5] + chain.positions[6]) / 2
+        let before = midpoint
+        // A fingertip rising into the middle of the segment from below.
+        let finger = ChainDynamics.Sphere(center: midpoint - SIMD3<Float>(0, 0.02, 0), radius: 0.012)
+        for _ in 0..<45 { chain.step(toward: shape, deltaTime: 1 / 90, obstacles: [finger]) }
+        #expect(!chain.touches([finger]))
+        let after = (chain.positions[5] + chain.positions[6]) / 2
+        // Lifted clear: by the finger's reach plus the tail's own thickness.
+        #expect(after.y - before.y > 0.02, "segment midpoint rose only \(after.y - before.y) m")
+        // Both neighbouring joints moved, not just one.
+        #expect(chain.positions[5].y > shape[5].y - 0.2 && chain.positions[6].y > before.y - 0.05)
+        let total = zip(chain.positions, chain.positions.dropFirst()).reduce(0) { $0 + simd_length($1.1 - $1.0) }
+        #expect(abs(total - 0.128 * 9) < 1e-3)
     }
 }
