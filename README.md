@@ -9,6 +9,13 @@ Its sibling, **RAVE SDK**, covers the app-shaped half — general UI, camera,
 siblings with **no dependency between them**, which is what lets Engine add
 macOS support on its own schedule. An app that is both simply links both.
 
+The RAVE family is fixed at exactly these two packages. Shared code that
+needs a home becomes a **target inside Engine or SDK** (like `RAVERig` did),
+never a new third sibling package — see `RAVEPCVR` below for what that means
+in practice. And "Robot-Assisted Vision Enhancements" describes the acronym,
+not a scope filter: `RAVERig` (character rigging) belongs here because it's
+XR/game-shaped, same as input and diagnostics, not because it's about vision.
+
 ## Platforms
 
 visionOS 26 today. macOS is declared already because the sensing, binding and
@@ -28,7 +35,7 @@ and head pose. Hand input sits behind `RAVEHandInputProvider`, which returns
 | `RAVEInput` | shipping | Hand and controller sensing, pinch/joystick/palm geometry, binding tables |
 | `RAVEDiagnostics` | shipping | Frame profiler, metric collector, feed gating, HUD views |
 | `RAVERig` | shipping | Skeleton geometry, humanoid inference, FABRIK, pose solving, leg stepping |
-| `RAVEPCVR` | planned | Controller-bridge protocol, sourced from Longwave |
+| `RAVEPCVR` | planned | Only the reusable controller-bridge *protocol*, once a second app needs it — not Longwave's PCVR feature as a whole (paywall, session limiting, CloudXR host stay Longwave-only and mostly closed-source; see this repo's CLAUDE.md) |
 
 ## RAVEInput
 

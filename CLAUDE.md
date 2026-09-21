@@ -52,6 +52,33 @@ sits behind `RAVEHandInputProvider`, which returns `RAVENoHandInput` off-visionO
 |---|---|
 | `RAVEInput` | Hand + controller sensing, pinch/joystick/palm geometry, binding tables |
 | `RAVEDiagnostics` | Frame profiler, metric collector, feed gating, HUD views |
+| `RAVERig` | Skeleton geometry, humanoid inference, FABRIK, pose solving, leg stepping — shipping, see README |
+| `RAVEPCVR` | Planned — see "About the planned RAVEPCVR target" below before touching this |
+
+**"XR/game-shaped" is the real scope, not the acronym.** Robot-Assisted Vision Enhancements
+reads like it's about vision/perception; it isn't a scope boundary. `RAVERig` (skeleton IK,
+character rigging) already ships here and is not a category error — it's XR/game-shaped
+exactly like input and diagnostics are. Judge whether something belongs in Engine vs. SDK by
+the app-shaped/XR-shaped split in the header above, never by parsing the acronym.
+
+### About the planned `RAVEPCVR` target
+
+This package's family is fixed at exactly **two** sibling packages: this one and `RAVESDK`
+(`../RAVESDK`). When code used by multiple apps needs a shared home, the answer is always
+**a target inside one of these two**, never a new third sibling package. Do not create a
+`RAVEPCVR` repo alongside `RAVEEngine`/`RAVESDK` — if it ever gets built, it is a target
+added to *this* package's `Package.swift`, the same way `RAVERig` was.
+
+`RAVEPCVR` is planned to hold only the **reusable controller-bridge protocol** — the
+wire-level shape shared between a headset client and a host, once a second app needs it.
+It is **not** a place for Longwave's PCVR feature as a whole. Longwave's PCVR is a paid,
+app-specific product surface — trial limiting (`PCVRSessionLimiter`), the StoreKit paywall
+(`PCVRStore`/`PCVRPaywallView`), the CloudXR session-management host, and the gesture/gaze
+internals — and per `~/Projects/Longwave/CLAUDE.md` most of that is closed-source and lives
+in private submodules that don't even attach to this Xcode project. None of it moves here
+just because it's "PCVR-related." Only extract a piece into `RAVEPCVR` once a second
+consumer actually needs that exact piece, the same convergence rule every other target here
+followed (see "Working on this codebase" below).
 
 ## The isolation rule (both targets)
 
