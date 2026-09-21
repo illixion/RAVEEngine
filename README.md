@@ -34,7 +34,7 @@ and head pose. Hand input sits behind `RAVEHandInputProvider`, which returns
 |---|---|---|
 | `RAVEInput` | shipping | Hand and controller sensing, pinch/joystick/palm geometry, binding tables |
 | `RAVEDiagnostics` | shipping | Frame profiler, metric collector, feed gating, HUD views |
-| `RAVERig` | shipping | Skeleton geometry, humanoid inference, FABRIK, pose solving, leg stepping |
+| `RAVERig` | shipping | Skeleton geometry, humanoid inference, FABRIK, pose solving, leg stepping, tail dynamics |
 | `RAVEPCVR` | planned | Only the reusable controller-bridge *protocol*, once a second app needs it — not Longwave's PCVR feature as a whole (paywall, session limiting, CloudXR host stay Longwave-only and mostly closed-source; see this repo's CLAUDE.md) |
 
 ## RAVEInput
@@ -130,6 +130,9 @@ to pose a Half-Life player model from a tracked head and hands.
 | `FABRIK` | Forward And Backward Reaching IK over a chain of points, with a pole constraint and reach/fold limits. Any number of segments. |
 | `PoseSolver` | Turns a FABRIK solution back into joint rotations, which is what a skeleton actually stores. |
 | `LegStepper` | Plans footfalls — where each foot plants, when it lifts, the arc it swings through. |
+| `TailArchitecture` | Finds a tail from geometry: a weighted chain of joints leaving the pelvis backward or down, that is not a limb. |
+| `ChainDynamics` | Verlet particle chain for secondary motion — a tail, an ear, a strap — with gravity, a spring toward the animated shape, fixed lengths, a bend limit and a floor. |
+| `TailSway` | The deliberate half of a tail: a wag about the base and a carriage height, eased between styles. |
 | `BindPoseCheck` | Validates a rig before anything downstream trusts it. |
 
 ### The two halves of a solve are deliberately separate
