@@ -91,6 +91,18 @@ public enum FABRIK {
     ///   Pass the character's forward direction: the plane's normal is then
     ///   its left-right axis, and each leg swings sagittally.
     ///
+    /// - Parameter bendTowardPole: whether the pole also chooses the side.
+    ///   When true, a chain whose interior joints sit on the far side of the
+    ///   root–target line is mirrored across that line, within the bend
+    ///   plane, before solving, so the bend ends up on the pole's side.
+    ///
+    ///   Off by default, for the reason above: an animated leg already bends
+    ///   the right way and must not be second-guessed. An arm posed from a
+    ///   single frozen frame is the other case — its elbow sits wherever that
+    ///   frame left it, and only the pole knows where it belongs. Measured on
+    ///   a Half-Life player model: with the side left to the seed, a hand
+    ///   raised to the face put the elbow up behind the shoulder.
+    ///
     /// - Parameter reachLimit: the furthest the tip is aimed, as a fraction
     ///   of the chain's total length. It earns its place twice. A leg at full
     ///   extension is a locked leg, which reads as a limp whatever the rest
@@ -119,6 +131,7 @@ public enum FABRIK {
     public static func solve(chain: [SIMD3<Float>],
                              target: SIMD3<Float>,
                              pole: SIMD3<Float>? = nil,
+                             bendTowardPole: Bool = false,
                              iterations: Int = 16,
                              reachLimit: Float = 0.98,
                              foldLimit: Float = 0.25,
@@ -141,6 +154,9 @@ public enum FABRIK {
 
         let root = chain[0]
         var joints = pole.map { flattened(chain, root: root, target: target, pole: $0) } ?? chain
+        if bendTowardPole, let pole {
+            joints = bentToward(pole, joints, root: root, target: target)
+        }
         joints[0] = root
         let last = joints.count - 1
 
@@ -263,5 +279,32 @@ public enum FABRIK {
         let normal = simd_cross(axis, inPlane)
         guard simd_length(normal) > 1e-6 else { return chain }
         return chain.map { $0 - normal * simd_dot($0 - root, normal) }
+    }
+
+    /// `chain` with its bend on `pole`'s side of the root–target line.
+    ///
+    /// Judged on the interior joints together and mirrored together, across
+    /// the line and within the bend plane — an isometry, so segment lengths
+    /// survive. Expects a chain already flattened into that plane; an
+    /// out-of-plane component is left alone. Untouched when the plane is
+    /// not well defined, for the same reasons as `flattened`.
+    static func bentToward(_ pole: SIMD3<Float>, _ chain: [SIMD3<Float>], root: SIMD3<Float>,
+                           target: SIMD3<Float>) -> [SIMD3<Float>] {
+        guard chain.count >= 3 else { return chain }
+        var axis = target - root
+        let reach = simd_length(axis)
+        guard reach > 1e-6 else { return chain }
+        axis /= reach
+        var inPlane = pole - axis * simd_dot(pole, axis)
+        guard simd_length(inPlane) > 1e-6 else { return chain }
+        inPlane = simd_normalize(inPlane)
+        let interior = 1..<(chain.count - 1)
+        let side = interior.reduce(Float(0)) { $0 + simd_dot(chain[$1] - root, inPlane) }
+        guard side < 0 else { return chain }
+        var out = chain
+        for i in interior {
+            out[i] -= inPlane * (2 * simd_dot(chain[i] - root, inPlane))
+        }
+        return out
     }
 }

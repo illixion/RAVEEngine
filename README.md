@@ -168,6 +168,14 @@ between the two once per iteration. A standing leg reaching for the ground
 beneath it is exactly that shape. The solver nudges an interior joint off the
 line first; the pole, when given, decides which way.
 
+The pole fixes the bend *plane*; by default it does not choose the side of the
+bend, because an animated leg already bends the right way and must not be
+second-guessed. A chain seeded from a single frozen frame is the other case —
+a player model's arm, whose elbow sits wherever that frame left it — and for
+that `bendTowardPole: true` mirrors the seed across the root–target line so the
+bend ends up on the pole's side. Measured on a Half-Life arm, the default put a
+hand raised to the face with its elbow up behind the shoulder.
+
 ## Consuming this package
 
 The visionOS apps link this package as a **local** Swift package — an Xcode

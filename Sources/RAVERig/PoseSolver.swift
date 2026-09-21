@@ -161,7 +161,9 @@ public struct PoseSolver: Sendable {
     /// back into `pose` as joint rotations.
     ///
     /// `target` and `pole` are in the same space as the model matrices — the
-    /// space the root of the skeleton sits in.
+    /// space the root of the skeleton sits in. `bendTowardPole` is FABRIK's:
+    /// off, the pole only fixes the plane and the current pose keeps its
+    /// side of the bend; on, the pole chooses the side too.
     ///
     /// `model` is taken `inout` and kept current for the solved joints, so
     /// several chains can be solved against one array in sequence. Joints
@@ -171,6 +173,7 @@ public struct PoseSolver: Sendable {
     public func solve(chain: Chain,
                       target: SIMD3<Float>,
                       pole: SIMD3<Float>? = nil,
+                      bendTowardPole: Bool = false,
                       weight: Float = 1,
                       iterations: Int = 8,
                       reachLimit: Float = 0.98,
@@ -181,6 +184,7 @@ public struct PoseSolver: Sendable {
 
         let points = joints.map { Self.translation(of: model[$0]) }
         let solution = FABRIK.solve(chain: points, target: target, pole: pole,
+                                    bendTowardPole: bendTowardPole,
                                     iterations: iterations, reachLimit: reachLimit)
 
         // Walk from the root of the chain down, turning each joint so its
