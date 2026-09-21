@@ -47,6 +47,20 @@ public struct ChainDynamics: Sendable, Equatable {
         public init() {}
     }
 
+    /// Something the chain may not pass through — a hand, in practice: a
+    /// palm and fingertips as spheres. A particle found inside one is pushed
+    /// to its surface, and the Verlet integration turns that displacement
+    /// into velocity, so a hand swept through the chain flicks it.
+    public struct Sphere: Sendable, Equatable {
+        public var center: SIMD3<Float>
+        public var radius: Float
+
+        public init(center: SIMD3<Float>, radius: Float) {
+            self.center = center
+            self.radius = radius
+        }
+    }
+
     public var settings: Settings
     /// Current particle positions, base first. The base is pinned to the
     /// animated base every step.
@@ -79,7 +93,9 @@ public struct ChainDynamics: Sendable, Equatable {
     ///     Its first entry pins the base; its segment lengths are the ones
     ///     enforced, so a rescaled character rescales the chain.
     ///   - floor: height nothing may sink below, when there is a floor.
-    public mutating func step(toward shape: [SIMD3<Float>], deltaTime: Float, floor: Float? = nil) {
+    ///   - obstacles: volumes the chain is kept out of, this frame.
+    public mutating func step(toward shape: [SIMD3<Float>], deltaTime: Float, floor: Float? = nil,
+                              obstacles: [Sphere] = []) {
         guard shape.count == positions.count, shape.count >= 2 else {
             reset(to: shape)
             return
@@ -120,9 +136,23 @@ public struct ChainDynamics: Sendable, Equatable {
                     }
                     positions[i] = positions[i - 1] + direction * lengths[i - 1]
                     if let floor, positions[i].y < floor { positions[i].y = floor }
+                    for sphere in obstacles {
+                        let away = positions[i] - sphere.center
+                        let distance = simd_length(away)
+                        guard distance < sphere.radius else { continue }
+                        // A particle dead on the centre has no way out; send
+                        // it up, which for a hand under a tail is right.
+                        let outward = distance > 1e-5 ? away / distance : SIMD3<Float>(0, 1, 0)
+                        positions[i] = sphere.center + outward * sphere.radius
+                    }
                 }
             }
         }
+    }
+
+    /// Whether any particle is inside one of `obstacles`, for diagnostics.
+    public func touches(_ obstacles: [Sphere]) -> Bool {
+        positions.contains { p in obstacles.contains { simd_distance(p, $0.center) < $0.radius - 1e-4 } }
     }
 
     /// `direction`, rotated toward `along` until they are within `maxBend`.
@@ -184,9 +214,65 @@ public struct TailSway: Sendable, Equatable {
     public var responseRate: Float = 2
     private var phase: Float = 0
 
+    /// Fastest the tail's carriage may swing round to follow the body, in
+    /// radians per second.
+    ///
+    /// The body turns on the spot in a fraction of a second. A tail whose
+    /// animated shape is welded to the pelvis sweeps its tip through metres
+    /// in that time, and the spring then hauls the simulated tail after it
+    /// along the chord — through the legs — which reads as a flick. A real
+    /// tail is carried round after the body, so the heading the shape is
+    /// held at follows the body's at a bounded rate and the physics only
+    /// ever sees a target that moves at a pace it can keep up with.
+    public var maxTurnRate: Float = .pi
+    /// The heading, about `up`, the animated shape is currently carried at.
+    /// Nil until the first `follow`, which adopts the body's heading.
+    public private(set) var heading: Float?
+
     public init(style: Style) {
         wanted = style
         current = style
+    }
+
+    /// Forgets the followed heading, so the next `follow` adopts the body's
+    /// outright — for a character that has been teleported.
+    public mutating func snapHeading() {
+        heading = nil
+    }
+
+    /// `shape` turned about its base so it faces the followed heading rather
+    /// than the body's, with the followed heading advanced toward the body's
+    /// by at most `maxTurnRate` times `deltaTime`.
+    ///
+    /// Heading is the direction from the base to the tip in the plane
+    /// perpendicular to `up`; a shape hanging straight up or down has none
+    /// and is passed through untouched.
+    public mutating func follow(_ shape: [SIMD3<Float>], deltaTime: Float,
+                                up: SIMD3<Float> = SIMD3<Float>(0, 1, 0)) -> [SIMD3<Float>] {
+        guard shape.count >= 2 else { return shape }
+        let base = shape[0]
+        let along = shape[shape.count - 1] - base
+        let flat = along - up * simd_dot(along, up)
+        guard simd_length(flat) > 0.05 * max(simd_length(along), 1e-6) else { return shape }
+        // Yaw measured in a frame built on `up`, so this works for any up.
+        let reference = abs(up.y) < 0.9 ? SIMD3<Float>(0, 1, 0) : SIMD3<Float>(0, 0, 1)
+        let right = simd_normalize(simd_cross(up, reference))
+        let forward = simd_cross(right, up)
+        let bodyHeading = atan2(simd_dot(flat, right), simd_dot(flat, forward))
+        guard let held = heading else {
+            heading = bodyHeading
+            return shape
+        }
+        var delta = bodyHeading - held
+        while delta > .pi { delta -= 2 * .pi }
+        while delta < -.pi { delta += 2 * .pi }
+        let limit = maxTurnRate * min(max(deltaTime, 0), 0.1)
+        let advanced = held + min(max(delta, -limit), limit)
+        heading = advanced
+        let lag = advanced - bodyHeading
+        guard abs(lag) > 1e-5 else { return shape }
+        let rotation = simd_quatf(angle: lag, axis: simd_normalize(up))
+        return shape.map { base + rotation.act($0 - base) }
     }
 
     /// Advances the wag by `deltaTime` and returns the angles to apply:

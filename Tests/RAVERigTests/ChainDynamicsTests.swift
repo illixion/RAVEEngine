@@ -153,3 +153,120 @@ import simd
         #expect(abs(sway.current.amplitude - sway.wanted.amplitude) < 0.01)
     }
 }
+
+/// A turn on the spot is where the tail flicked: the shape welded to the
+/// pelvis swung its tip through metres in a fraction of a second and the
+/// spring hauled the tail after it along the chord. The carriage now follows
+/// the body's heading at a bounded rate.
+@Suite struct TailHeadingTests {
+
+    private func tail() -> [SIMD3<Float>] {
+        (0..<10).map { SIMD3<Float>(0, 0.97, 0.128 * Float($0)) }
+    }
+
+    private func heading(of shape: [SIMD3<Float>]) -> Float {
+        let d = shape[shape.count - 1] - shape[0]
+        return atan2(d.x, d.z)
+    }
+
+    @Test func theCarriageTurnsNoFasterThanTheLimit() {
+        var sway = TailSway(style: .still)
+        sway.maxTurnRate = .pi   // 180 degrees a second
+        let shape = tail()
+        _ = sway.follow(shape, deltaTime: 1 / 90)
+        // The body turns 180 degrees at once.
+        let turned = TailSway.apply(to: shape, yaw: .pi, pitch: 0)
+        var last = heading(of: shape)
+        var frames = 0
+        var worstStep: Float = 0
+        while frames < 400 {
+            let followed = sway.follow(turned, deltaTime: 1 / 90)
+            let now = heading(of: followed)
+            var step = now - last
+            while step > .pi { step -= 2 * .pi }
+            while step < -.pi { step += 2 * .pi }
+            worstStep = max(worstStep, abs(step))
+            last = now
+            frames += 1
+            if abs(step) < 1e-4, frames > 10 { break }
+        }
+        #expect(worstStep < (.pi / 90) * 1.05, "carriage turned \(worstStep * 180 / .pi) degrees in one frame")
+        // Half a turn at 180 degrees a second is a second: ninety frames,
+        // not one — and it does get there.
+        #expect(frames >= 85 && frames <= 100, "took \(frames) frames to come round")
+        let final = heading(of: sway.follow(turned, deltaTime: 1 / 90))
+        var error = final - heading(of: turned)
+        while error > .pi { error -= 2 * .pi }
+        while error < -.pi { error += 2 * .pi }
+        #expect(abs(error) < 0.01)
+    }
+
+    @Test func aSmallTurnGoesTheShortWayRound() {
+        var sway = TailSway(style: .still)
+        let shape = TailSway.apply(to: tail(), yaw: 170 * .pi / 180, pitch: 0)
+        _ = sway.follow(shape, deltaTime: 1 / 90)
+        let turned = TailSway.apply(to: tail(), yaw: -170 * .pi / 180, pitch: 0)
+        // 20 degrees the short way at 180 degrees a second is a ninth of a
+        // second; the long way round would be nearly two seconds.
+        var frames = 0
+        var followed = shape
+        repeat {
+            followed = sway.follow(turned, deltaTime: 1 / 90)
+            frames += 1
+        } while simd_distance(followed[9], turned[9]) > 0.01 && frames < 400
+        #expect(frames < 20, "took \(frames) frames for a 20 degree turn")
+    }
+
+    @Test func theTipNoLongerCutsThroughTheBodyOnATurn() {
+        // Same 180 degree turn, through the whole pipeline: heading follow,
+        // then physics. The tip must stay out beyond most of the tail's
+        // length from the base the whole way round — the chord cut it to
+        // nearly nothing.
+        var sway = TailSway(style: .still)
+        var chain = ChainDynamics(shape: tail())
+        let shape = tail()
+        for _ in 0..<180 { chain.step(toward: sway.follow(shape, deltaTime: 1 / 90), deltaTime: 1 / 90) }
+        let turned = TailSway.apply(to: shape, yaw: .pi, pitch: 0)
+        var closest: Float = .infinity
+        var fastest: Float = 0
+        var previousTip = chain.positions[9]
+        for _ in 0..<270 {
+            chain.step(toward: sway.follow(turned, deltaTime: 1 / 90), deltaTime: 1 / 90)
+            let tip = chain.positions[9]
+            let base = chain.positions[0]
+            closest = min(closest, simd_length(SIMD2(tip.x - base.x, tip.z - base.z)))
+            fastest = max(fastest, simd_distance(tip, previousTip) * 90)
+            previousTip = tip
+        }
+        #expect(closest > 0.7, "tip came within \(closest) m of the base in plan during a turn")
+        #expect(fastest < 6, "tip reached \(fastest) m/s")
+        var error = heading(of: chain.positions) - heading(of: turned)
+        while error > .pi { error -= 2 * .pi }
+        while error < -.pi { error += 2 * .pi }
+        #expect(abs(error) < 0.1)
+    }
+}
+
+@Suite struct ChainObstacleTests {
+
+    private func tail() -> [SIMD3<Float>] {
+        (0..<10).map { SIMD3<Float>(0, 0.97, 0.128 * Float($0)) }
+    }
+
+    @Test func aHandPushesTheTailOutAndItSpringsBack() {
+        let shape = tail()
+        var chain = ChainDynamics(shape: shape)
+        for _ in 0..<180 { chain.step(toward: shape, deltaTime: 1 / 90) }
+        let resting = chain.positions[6]
+        // A palm placed right on the seventh particle, from below.
+        let hand = ChainDynamics.Sphere(center: resting - SIMD3<Float>(0, 0.03, 0), radius: 0.06)
+        for _ in 0..<45 { chain.step(toward: shape, deltaTime: 1 / 90, obstacles: [hand]) }
+        #expect(!chain.touches([hand]))
+        #expect(chain.positions[6].y > resting.y + 0.02, "the tail did not lift off the hand")
+        let total = zip(chain.positions, chain.positions.dropFirst()).reduce(0) { $0 + simd_length($1.1 - $1.0) }
+        #expect(abs(total - 0.128 * 9) < 1e-3)
+        // Hand withdrawn: back to where it hung.
+        for _ in 0..<270 { chain.step(toward: shape, deltaTime: 1 / 90) }
+        #expect(simd_distance(chain.positions[6], resting) < 0.01)
+    }
+}
