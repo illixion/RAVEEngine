@@ -363,3 +363,146 @@ struct LegStepperSettleTests {
         #expect(seen.allSatisfy { $0 >= 0 && $0 <= 1 })
     }
 }
+
+/// How a walk ends and how the next one begins. Each of these was a visible
+/// jump on the headset first: the foot in the air when the path ran out
+/// snapped back to its last footprint, the leading foot took a step
+/// backward to square up, and a new walk threw both feet half a step ahead
+/// in a single frame.
+@Suite("Stopping and starting")
+struct LegStepperStopStartTests {
+
+    private func positions(_ p: (left: LegStepper.Placement, right: LegStepper.Placement)) -> [SIMD3<Float>] {
+        [p.left.position, p.right.position]
+    }
+
+    /// Largest distance either foot moved between two consecutive frames.
+    private func largestJump(_ frames: [[SIMD3<Float>]]) -> Float {
+        var worst: Float = 0
+        for (a, b) in zip(frames, frames.dropFirst()) {
+            worst = max(worst, simd_distance(a[0], b[0]), simd_distance(a[1], b[1]))
+        }
+        return worst
+    }
+
+    @Test func aFootCaughtInTheAirFinishesItsStepInsteadOfSnappingBack() {
+        var stepper = LegStepper(stepLength: 0.4, footSpacing: 0.24, liftHeight: 0.08)
+        var hips = SIMD3<Float>(0, 1, 0)
+        let forward = SIMD3<Float>(0, 0, 1)
+        var last = stepper.step(hips: hips, forward: forward, travelled: 0, floor: { _ in 0 })
+        // Walk until a foot is well off the ground.
+        var guardCount = 0
+        repeat {
+            hips += forward * 0.02
+            last = stepper.step(hips: hips, forward: forward, travelled: 0.02, floor: { _ in 0 })
+            guardCount += 1
+        } while max(last.left.position.y, last.right.position.y) < 0.04 && guardCount < 400
+        #expect(max(last.left.position.y, last.right.position.y) >= 0.04, "never caught a foot in the air")
+
+        var frames = [positions(last)]
+        var result = stepper.settle(hips: hips, forward: forward, closing: 0.02, floor: { _ in 0 })
+        frames.append(positions((result.left, result.right)))
+        var count = 0
+        while !result.settled, count < 400 {
+            result = stepper.settle(hips: hips, forward: forward, closing: 0.02, floor: { _ in 0 })
+            frames.append(positions((result.left, result.right)))
+            count += 1
+        }
+        #expect(result.settled)
+        // A swing covers about 3.6x the hip travel per frame; a snap back to
+        // the footprint would be a whole step.
+        let jump = largestJump(frames)
+        #expect(jump < 0.1, "a foot jumped \(jump) m in one frame while settling")
+    }
+
+    @Test func theLastStepLandsOnTheDestinationAndNoFootStepsBackward() {
+        var stepper = LegStepper(stepLength: 0.4, footSpacing: 0.24, liftHeight: 0.08)
+        var hips = SIMD3<Float>(0, 1, 0)
+        let forward = SIMD3<Float>(0, 0, 1)
+        let destination = SIMD3<Float>(0, 1, 1.73)
+        stepper.beginWalk()
+        var frames: [[SIMD3<Float>]] = []
+        while hips.z < destination.z - 1e-4 {
+            let step = min(0.02, destination.z - hips.z)
+            hips += forward * step
+            let p = stepper.step(hips: hips, forward: forward, travelled: step,
+                                 remaining: destination.z - hips.z, floor: { _ in 0 })
+            frames.append(positions(p))
+        }
+        // No landing past the destination.
+        for frame in frames {
+            #expect(frame[0].z <= destination.z + 1e-3, "left foot landed \(frame[0].z - destination.z) m past the end")
+            #expect(frame[1].z <= destination.z + 1e-3, "right foot landed \(frame[1].z - destination.z) m past the end")
+        }
+        var result = stepper.settle(hips: hips, forward: forward, closing: 0.02, floor: { _ in 0 })
+        frames.append(positions((result.left, result.right)))
+        var count = 0
+        while !result.settled, count < 400 {
+            result = stepper.settle(hips: hips, forward: forward, closing: 0.02, floor: { _ in 0 })
+            frames.append(positions((result.left, result.right)))
+            count += 1
+        }
+        #expect(result.settled)
+        // Settling only ever moves a foot forward, or nowhere: the backward
+        // shuffle is what a landing past the destination produced.
+        var backward: Float = 0
+        for (a, b) in zip(frames, frames.dropFirst()) {
+            backward = max(backward, a[0].z - b[0].z, a[1].z - b[1].z)
+        }
+        #expect(backward < 0.02, "a foot moved \(backward) m backward while stopping")
+        #expect(abs(result.left.position.z - hips.z) < 0.15)
+        #expect(abs(result.right.position.z - hips.z) < 0.15)
+        #expect(largestJump(frames) < 0.1)
+    }
+
+    @Test func aNewWalkStartsFromWhereTheFeetStand() {
+        var stepper = LegStepper(stepLength: 0.4, footSpacing: 0.24, liftHeight: 0.08)
+        let hips = SIMD3<Float>(0, 1, 0)
+        let forward = SIMD3<Float>(0, 0, 1)
+        var standing = stepper.settle(hips: hips, forward: forward, closing: 0.02, floor: { _ in 0 })
+        var count = 0
+        while !standing.settled, count < 400 {
+            standing = stepper.settle(hips: hips, forward: forward, closing: 0.02, floor: { _ in 0 })
+            count += 1
+        }
+        let before = positions((standing.left, standing.right))
+        stepper.beginWalk()
+        var moving = hips + forward * 0.01
+        let first = stepper.step(hips: moving, forward: forward, travelled: 0.01, floor: { _ in 0 })
+        let after = positions(first)
+        #expect(simd_distance(before[0], after[0]) < 1e-4, "left foot jumped \(simd_distance(before[0], after[0])) m at walk start")
+        #expect(simd_distance(before[1], after[1]) < 1e-4, "right foot jumped \(simd_distance(before[1], after[1])) m at walk start")
+        // And the walk then proceeds normally: a foot lifts within a step.
+        var lifted = false
+        var frames = [after]
+        for _ in 0..<40 {
+            moving += forward * 0.01
+            let p = stepper.step(hips: moving, forward: forward, travelled: 0.01, floor: { _ in 0 })
+            frames.append(positions(p))
+            lifted = lifted || !p.left.planted || !p.right.planted
+        }
+        #expect(lifted)
+        #expect(largestJump(frames) < 0.1)
+    }
+
+    @Test func aWalkRequestedMidCloseFinishesPuttingTheFootDown() {
+        var stepper = LegStepper(stepLength: 0.4, footSpacing: 0.24, liftHeight: 0.08)
+        var hips = SIMD3<Float>(0, 1, 0)
+        let forward = SIMD3<Float>(0, 0, 1)
+        for _ in 0..<73 {
+            hips += forward * 0.02
+            _ = stepper.step(hips: hips, forward: forward, travelled: 0.02, floor: { _ in 0 })
+        }
+        // A few slow frames of settling: one foot is now mid-close.
+        var last = stepper.settle(hips: hips, forward: forward, closing: 0.004, floor: { _ in 0 })
+        for _ in 0..<3 { last = stepper.settle(hips: hips, forward: forward, closing: 0.004, floor: { _ in 0 }) }
+        #expect(!(last.left.planted && last.right.planted), "expected a foot mid-close")
+        var frames = [positions((last.left, last.right))]
+        stepper.beginWalk()
+        for _ in 0..<80 {
+            hips += forward * 0.02
+            frames.append(positions(stepper.step(hips: hips, forward: forward, travelled: 0.02, floor: { _ in 0 })))
+        }
+        #expect(largestJump(frames) < 0.1, "a foot jumped \(largestJump(frames)) m when a walk began mid-close")
+    }
+}

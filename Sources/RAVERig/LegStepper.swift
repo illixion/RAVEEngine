@@ -57,6 +57,10 @@ public struct LegStepper: Sendable {
     private var closing: Int?
     private var closeProgress: Float = 0
     private var closeFrom: SIMD3<Float> = .zero
+    /// How many feet have been closed up since the walk stopped. The first
+    /// close is held to a tight tolerance; a second one is only worth taking
+    /// when a foot is genuinely out of place.
+    private var closedThisStop = 0
 
     public init(stepLength: Float, footSpacing: Float,
                 liftHeight: Float = 0.06, stanceFraction: Float = 0.62) {
@@ -93,7 +97,29 @@ public struct LegStepper: Sendable {
         lastForward = nil
         closing = nil
         closeProgress = 0
+        closedThisStop = 0
     }
+
+    /// Starts a walk from wherever the feet are standing.
+    ///
+    /// `reset` forgets the plants, and the first step then puts both feet
+    /// half a step AHEAD of the hips in one frame — which is the jump at the
+    /// start of every walk. A character that is standing has its feet on the
+    /// ground already, and those are the right places to start from: the
+    /// cycle restarts at the point where both feet are down and the first
+    /// swing is still a fraction of a step away, so the first thing that
+    /// happens is a foot lifting, not a foot appearing somewhere else.
+    ///
+    /// A foot still closing up from the previous stop is left closing: the
+    /// first frames of the walk finish putting it down, and the cycle starts
+    /// once it has.
+    public mutating func beginWalk() {
+        distance = 0
+        closedThisStop = 0
+    }
+
+    /// Where the closing foot is headed, kept for the diagnostics.
+    private var closeTarget: SIMD3<Float>?
 
     /// Advances the cycle and returns where both feet belong.
     ///
@@ -101,11 +127,25 @@ public struct LegStepper: Sendable {
     ///   - hips: the body's position on the floor, in world space.
     ///   - forward: unit vector the character walks along, on the floor plane.
     ///   - travelled: metres covered since the last call.
+    ///   - remaining: metres still to go before the walk ends, when known. A
+    ///     landing is never placed past the destination, so the last step
+    ///     shortens to arrive on it instead of overshooting and having to be
+    ///     pulled back — which is the backward shuffle a walk used to end in.
     ///   - floor: height of the ground under a given point, for stepping onto
     ///     and off surfaces. Return `hips.y` to keep the feet on one level.
     public mutating func step(hips: SIMD3<Float>, forward: SIMD3<Float>, travelled: Float,
+                              remaining: Float? = nil,
                               floor: (SIMD3<Float>) -> Float)
         -> (left: Placement, right: Placement) {
+        closedThisStop = 0
+        // A foot caught mid-close by a new walk is put down first, at the
+        // pace of the walk, and only then does the cycle start — from
+        // distance zero, so nothing jumps.
+        if closing != nil {
+            let finishing = settle(hips: hips, forward: forward, closing: travelled, floor: floor)
+            closedThisStop = 0
+            if closing != nil { return (finishing.left, finishing.right) }
+        }
         // Turning moves the feet even when the hips do not. Each foot rides
         // an arc of radius half the hip width around the body, so a turn is
         // distance travelled as far as the gait is concerned, and counting
@@ -132,8 +172,10 @@ public struct LegStepper: Sendable {
             let local = (phase + offset).truncatingRemainder(dividingBy: 1)
             let side = across * (footSpacing / 2) * (foot == 0 ? 1 : -1)
             // Where this foot lands if it touches down now: half a step ahead
-            // of the hips, so the body passes over it through mid-stance.
-            var landing = hips + forward * (stepLength / 2) + side
+            // of the hips, so the body passes over it through mid-stance — or
+            // on the destination, when that is nearer.
+            let ahead = min(stepLength / 2, max(remaining ?? .infinity, 0))
+            var landing = hips + forward * ahead + side
             landing.y = floor(landing)
 
             let planted = local < stanceFraction
@@ -253,53 +295,78 @@ public struct LegStepper: Sendable {
             point.y = floor(point)
             return point
         }
+        // Where the foot actually is. A foot that was in the air when the
+        // walk stopped is at its swing position, not at the plant it took
+        // off from — reading the plant put the airborne foot back on its
+        // old footprint in one frame, which was the snap at the end of a
+        // walk.
         func current(_ foot: Int) -> SIMD3<Float> {
-            plant[foot] ?? swinging[foot] ?? neutral(foot)
+            if wasPlanted[foot] { return plant[foot] ?? swinging[foot] ?? neutral(foot) }
+            return swinging[foot] ?? plant[foot] ?? neutral(foot)
         }
-        // Close enough to stand on. A tenth of a step, so the pose handed
-        // back to the idle clip is a standing one rather than a narrow
-        // stride that still has to be blended away.
-        let tolerance = stepLength * 0.1
+        // Close enough to stand on. A tenth of a step for the first foot, so
+        // the pose handed back is a standing one; a third of a step after
+        // that, because a stance with the feet slightly staggered is how a
+        // walker actually stops, and pulling the leading foot back to square
+        // it up reads as a second, backward step.
+        let tolerance = stepLength * (closedThisStop == 0 ? 0.1 : 0.3)
 
-        // Pick a foot to close: the one further from where it should be.
         if closing == nil {
-            let gaps = (0...1).map { simd_distance(current($0), neutral($0)) }
-            if let worst = gaps.firstIndex(of: gaps.max()!), gaps[worst] > tolerance {
-                closing = worst
+            // A foot in the air is always dealt with first: it has nowhere to
+            // stand until it is put down. Otherwise close whichever foot is
+            // further from where it should be.
+            if let air = (0...1).first(where: { !wasPlanted[$0] && swinging[$0] != nil }) {
+                closing = air
+            } else {
+                let gaps = (0...1).map { simd_distance(current($0), neutral($0)) }
+                if let worst = gaps.firstIndex(of: gaps.max()!), gaps[worst] > tolerance {
+                    closing = worst
+                }
+            }
+            if let foot = closing {
                 closeProgress = 0
-                closeFrom = current(worst)
-                wasPlanted[worst] = false
+                closeFrom = current(foot)
+                wasPlanted[foot] = false
             }
         }
 
         guard let foot = closing else {
             // Both are where they belong; hold them there.
             for index in 0...1 where plant[index] == nil { plant[index] = neutral(index) }
+            closeTarget = nil
             return (Placement(position: current(0), planted: true),
                     Placement(position: current(1), planted: true),
                     true)
         }
 
-        let travel = max(simd_distance(closeFrom, neutral(foot)), 0.01)
-        closeProgress = min(1, closeProgress + max(distance, 0) / travel)
-        var moving = simd_mix(closeFrom, neutral(foot),
-                              SIMD3<Float>(repeating: closeProgress))
+        // The closing foot moves at swing speed, not hip speed: a swing
+        // covers about a step and a half while the hips cover the swing's
+        // share of a step, so the last step of a walk keeps the pace of the
+        // ones before it instead of dragging.
+        let footTravel = max(distance, 0) * (2 - stanceFraction) / max(1 - stanceFraction, 0.05)
+        let toward = neutral(foot)
+        closeTarget = toward
+        let travel = max(simd_distance(closeFrom, toward), 0.01)
+        closeProgress = min(1, closeProgress + footTravel / travel)
+        var moving = simd_mix(closeFrom, toward, SIMD3<Float>(repeating: closeProgress))
         moving.y += sin(pow(closeProgress, 0.65) * .pi) * liftHeight * 0.6
         moving = heldOnOwnSide(moving, of: hips, across: across, foot: foot)
 
         let arrived = closeProgress >= 1
         if arrived {
-            plant[foot] = neutral(foot)
+            plant[foot] = toward
             swinging[foot] = nil
             wasPlanted[foot] = true
             closing = nil
+            closeTarget = nil
+            closedThisStop += 1
         } else {
             swinging[foot] = moving
         }
 
         let other = 1 - foot
         if plant[other] == nil { plant[other] = current(other) }
-        let closingPlacement = Placement(position: arrived ? neutral(foot) : moving,
+        let closingPlacement = Placement(position: arrived ? toward : moving,
                                          planted: arrived,
                                          swingProgress: arrived ? nil : closeProgress)
         let holdingPlacement = Placement(position: current(other), planted: true)
