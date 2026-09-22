@@ -37,9 +37,11 @@ build that names no source files did not happen.
 
 ## Platform declaration
 
-`Package.swift` declares `[.visionOS(.v26), .macOS(.v14)]`. visionOS is the product; macOS
-exists because the sensing, binding and diagnostics logic is deliberately framework-free so
-`swift test` can run it on the host, and because a Mac port is the direction.
+`Package.swift` declares `[.visionOS(.v26), .macOS(.v14), .iOS(.v26)]`. visionOS is the
+product; macOS exists because the sensing, binding and diagnostics logic is deliberately
+framework-free so `swift test` can run it on the host, and because a Mac port is the
+direction; iOS is declared because an omitted platform is not an excluded one — see the
+comment in `Package.swift`. **tvOS and watchOS are not declared.**
 
 **What will not port: hand tracking.** Its sensing core is ARKit `HandTrackingProvider` /
 `HandAnchor` / `HandSkeleton`. What does port: `GameController` polling, the binding
@@ -169,16 +171,26 @@ interpolating percentile, because these numbers have been read on device for mon
 
 ## How consumers use this
 
-Five visionOS apps under `~/Projects/`. During development each references this package as
-a **local** Swift package (`XCLocalSwiftPackageReference`), so edits are immediate. Once a
+Five apps under `~/Projects/`. During development each references this package as a
+**local** Swift package (`XCLocalSwiftPackageReference`), so edits are immediate. Once a
 target stabilises, tag it and switch that app to `.package(url:)`.
 
-| App | Links |
+What each app is and where new code goes lives in `~/Projects/CLAUDE.md`; this table is only
+the link list.
+
+| App (directory) | Links |
 |---|---|
-| `Spatialcraft` | `RAVEInput`, `RAVEDiagnostics` (+ SDK's `RAVEConsole`) |
-| `Longwave` | `RAVEInput`, `RAVEDiagnostics` (+ SDK's `RAVEUI`, `RAVEConsole`) |
-| `Lambda_VisionPro` | `RAVEInput`, `RAVEDiagnostics` (+ SDK's `RAVEConsole`) |
-| `spatialstash` | `RAVEDiagnostics` (+ SDK's `RAVENet`, `RAVEUI`, `RAVEConsole`) |
+| `Oneiros` (visionOS + macOS) | `RAVEInput`, `RAVEDiagnostics` (+ SDK's `RAVEConsole`) |
+| `Longwave` (visionOS + iOS + macOS) | `RAVEInput`, `RAVEDiagnostics` (+ SDK's `RAVEUI`, `RAVEConsole`, `RAVEMedia`, `RAVECamera`) |
+| `halflife-visionos/LambdaVision` | `RAVEInput`, `RAVEDiagnostics`, `RAVERig` (+ SDK's `RAVEConsole`) |
+| `Hypnos` (visionOS + iOS) | `RAVEDiagnostics` (+ SDK's `RAVENet`, `RAVEUI`, `RAVEConsole`, `RAVEMedia`, `RAVESlideshow`) |
+| `spatial-ai-character` | `RAVEDiagnostics`, and `RAVERig` through its own `CharacterKit` package (+ SDK's `RAVEConsole`) |
+
+`RAVERig`'s two consumers are the reference case for the split rule: `CharacterKit` binds it
+to a RealityKit `SkeletalPose`, LambdaVision to a GoldSrc bone palette, and the shared half
+names no framework. Read the links from `productName = RAVE…` in each `project.pbxproj`, not
+from `import RAVE…` — `CharacterKit` re-exports `RAVERig`, so no file in spatial-ai-character
+spells the import.
 
 Apps keep their own spellings via typealiases (`BridgeHand = RAVEHandChirality`,
 `HandGestureMapping = RAVEFingerBindingTable<PlayerAction>`) so hundreds of call sites did
@@ -189,7 +201,7 @@ re-export the enum's cases — consuming files still need `import RAVEInput`.
 consuming apps are the real integration test. After changing a public API, build them:
 
 ```bash
-cd ~/Projects/Spatialcraft && xcodebuild -project Spatialcraft.xcodeproj -scheme Spatialcraft \
+cd ~/Projects/Oneiros && xcodebuild -project Oneiros.xcodeproj -scheme Oneiros \
   -sdk xros -destination 'generic/platform=visionOS' build CODE_SIGNING_ALLOWED=NO
 
 # Longwave's PCVR code is behind a flag — the default build compiles none of it
