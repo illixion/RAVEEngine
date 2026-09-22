@@ -21,7 +21,8 @@
  **Each hand joins and leaves on its own.** Both hands start the swing, but once
  moving either can carry it alone, so a player can keep running on one arm and
  aim with the other. A hand leaves when both of its own signals lapse, or at
- once when it makes a pointing pose (index out, the rest curled: a finger gun).
+ once when it makes a pointing pose: a finger gun, index out with the ring and
+ little fingers curled, the middle either curled or held out alongside the index.
  That pose is a deliberate signal, where a lapse could be tracking noise. A hand
  that left rejoins only after it has been a swinging fist for `rejoinHold`, so
  firing (an index curl) while sweeping the aim does not pull it back in. The
@@ -361,8 +362,12 @@ public struct RAVEArmSwinger: Sendable {
             let indexCurled = sample.index.extension_ < t.fistCurlThreshold
             let curled = sample.curledFingerCount(threshold: t.fistCurlThreshold)
             let fist = indexCurled && curled >= t.fistCurledFingerCount
-            // Index out with the other three mostly curled: a finger gun.
-            let pointing = sample.index.extension_ > t.pointExtension && curled >= 2
+            // A finger gun: index out, ring and little curled. The middle is
+            // free, because a two-finger gun (middle alongside the index) is
+            // the same gesture.
+            let pointing = sample.index.extension_ > t.pointExtension
+                && sample.ring.extension_ < t.fistCurlThreshold
+                && sample.little.extension_ < t.fistCurlThreshold
             let pattern = now - track.lastReversal <= t.patternWindow
                 && now - track.lastFast <= t.fastWindow
             return Reading(fist: fist, pattern: pattern, pointing: pointing)

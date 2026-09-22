@@ -26,12 +26,15 @@ private func hand(at wrist: SIMD3<Float>, fist: Bool,
                           ring: finger(0.02), little: finger(0.04))
 }
 
-/// The finger gun: index out, the other three curled.
-private func fingerGun(at wrist: SIMD3<Float>, trigger: Bool = false) -> RAVEHandSample {
+/// The finger gun: index out, the other three curled. `twoFinger` holds the
+/// middle out alongside the index too.
+private func fingerGun(at wrist: SIMD3<Float>, trigger: Bool = false,
+                       twoFinger: Bool = false) -> RAVEHandSample {
     var h = hand(at: wrist, fist: true)
     if !trigger {
         let p = simd_normalize(h.index.metacarpal - wrist)
         h.index.tip = h.index.metacarpal + p * 0.09
+        if twoFinger { h.middle.tip = h.middle.metacarpal + p * 0.09 }
     }
     return h
 }
@@ -246,6 +249,37 @@ struct RAVEArmSwingerTests {
         let mean = settled.reduce(0, +) / Float(settled.count)
         let beforeMean = before.reduce(0, +) / Float(before.count)
         #expect(mean > 0.8 * beforeMean)
+    }
+
+    @Test("A two-finger gun frees the gun hand too, and can't start a swing")
+    func twoFingerGun() {
+        var swinger = RAVEArmSwinger()
+        _ = run(&swinger, seconds: 2, sample: jog())
+        let aiming = run(&swinger, from: 2, seconds: 1,
+                         sample: leftJog { _ in fingerGun(at: aimPoint, twoFinger: true) })
+        let freed = aiming.firstIndex { !$0.rightSwinging }
+        #expect(freed != nil)
+        #expect(Double(freed ?? .max) * frame < 0.15)
+        #expect(aiming.allSatisfy { $0.engaged && $0.leftSwinging })
+
+        var fresh = RAVEArmSwinger()
+        let out = run(&fresh, seconds: 2) { t in
+            let (l, r) = jogWrists(t: t, amplitude: 0.15, hertz: 1.5)
+            return (hand(at: l, fist: true), fingerGun(at: r, twoFinger: true))
+        }
+        #expect(out.allSatisfy { !$0.engaged })
+    }
+
+    @Test("An open hand is not a pointing pose")
+    func openHandIsNotPointing() {
+        // Swinging open hands can't engage at all, so check the exit instead:
+        // an open, still gun hand leaves only by the grace, never at once.
+        var swinger = RAVEArmSwinger()
+        _ = run(&swinger, seconds: 2, sample: jog())
+        let open = run(&swinger, from: 2, seconds: 1,
+                       sample: leftJog { _ in hand(at: aimPoint, fist: false) })
+        let freed = open.firstIndex { !$0.rightSwinging } ?? 0
+        #expect(Double(freed) * frame >= 0.2)
     }
 
     @Test("Firing while running on one arm doesn't pull the gun hand back in")

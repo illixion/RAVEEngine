@@ -142,7 +142,7 @@ because the mean speed of a sinusoidal stroke is 64% of its peak and a ramp fed 
 speed can never hold 1.0. Its output is the joystick's shape, and what 1.0 means belongs to
 the game. `scaled(sensitivity:)` changes the effort needed, never the top speed. Hands join and
 leave individually once it is running, so one arm can carry the run while the other aims: a
-pointing pose (index out, a finger gun) is an explicit exit, and its fist test requires the
+pointing pose (index out, ring and little curled, middle either way: a one- or two-finger gun) is an explicit exit, and its fist test requires the
 index curled, since a finger gun has three curled fingers too. `leftSwinging`/`rightSwinging`
 tell the consumer which hands are free. LambdaVision
 is the only consumer so far.
