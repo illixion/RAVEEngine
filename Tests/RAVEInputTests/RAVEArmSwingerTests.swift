@@ -26,6 +26,28 @@ private func hand(at wrist: SIMD3<Float>, fist: Bool,
                           ring: finger(0.02), little: finger(0.04))
 }
 
+/// The finger gun: index out, the other three curled.
+private func fingerGun(at wrist: SIMD3<Float>, trigger: Bool = false) -> RAVEHandSample {
+    var h = hand(at: wrist, fist: true)
+    if !trigger {
+        let p = simd_normalize(h.index.metacarpal - wrist)
+        h.index.tip = h.index.metacarpal + p * 0.09
+    }
+    return h
+}
+
+/// Where the gun hand is held to aim: up in front, still.
+private let aimPoint = head + SIMD3<Float>(0.2, -0.25, -0.4)
+
+/// Jog the left arm while the right does `right(t)`.
+private func leftJog(_ right: @escaping (TimeInterval) -> RAVEHandSample?)
+    -> (TimeInterval) -> (RAVEHandSample?, RAVEHandSample?) {
+    { t in
+        let (l, _) = jogWrists(t: t, amplitude: 0.15, hertz: 1.5)
+        return (hand(at: l, fist: true), right(t))
+    }
+}
+
 /// A jogging stroke: forward-and-up, back-and-down, the two hands in
 /// anti-phase. `amplitude` is the forward reach of a stroke in meters.
 private func jogWrists(t: TimeInterval, amplitude: Float, hertz: Float) -> (SIMD3<Float>, SIMD3<Float>) {
@@ -192,6 +214,90 @@ struct RAVEArmSwingerTests {
         let s = run(&stock, seconds: 3, sample: gentle).suffix(90).map(\.speed01)
         #expect(e.reduce(0, +) > s.reduce(0, +))
         #expect(e.allSatisfy { $0 <= 1 })
+    }
+
+    @Test("A finger gun is not a fist, so it can't start a swing")
+    func fingerGunCannotEngage() {
+        var swinger = RAVEArmSwinger()
+        let out = run(&swinger, seconds: 2) { t in
+            let (l, r) = jogWrists(t: t, amplitude: 0.15, hertz: 1.5)
+            return (hand(at: l, fist: true), fingerGun(at: r))
+        }
+        #expect(out.allSatisfy { !$0.engaged })
+    }
+
+    @Test("Pointing the gun hand mid-run frees it and the other arm keeps running")
+    func oneArmCarriesTheRun() {
+        var swinger = RAVEArmSwinger()
+        _ = run(&swinger, seconds: 2, sample: jog())
+        let before = run(&swinger, from: 2, seconds: 0.5, sample: jog()).map(\.speed01)
+        let aiming = run(&swinger, from: 2.5, seconds: 2, sample: leftJog { _ in fingerGun(at: aimPoint) })
+
+        // Out within the point hold and a frame or two, never back in.
+        let freed = aiming.firstIndex { !$0.rightSwinging }
+        #expect(freed != nil)
+        #expect(Double(freed ?? .max) * frame < 0.15)
+        #expect(aiming.dropFirst(freed ?? 0).allSatisfy { !$0.rightSwinging })
+        #expect(aiming.allSatisfy { $0.engaged && $0.leftSwinging })
+
+        // The still gun hand doesn't drag the speed down: it is left out of
+        // the mean, so one arm jogging reads as both did.
+        let settled = aiming.suffix(90).map(\.speed01)
+        let mean = settled.reduce(0, +) / Float(settled.count)
+        let beforeMean = before.reduce(0, +) / Float(before.count)
+        #expect(mean > 0.8 * beforeMean)
+    }
+
+    @Test("Firing while running on one arm doesn't pull the gun hand back in")
+    func firingStaysFree() {
+        var swinger = RAVEArmSwinger()
+        _ = run(&swinger, seconds: 2, sample: jog())
+        _ = run(&swinger, from: 2, seconds: 0.5, sample: leftJog { _ in fingerGun(at: aimPoint) })
+        // Hold the trigger for a second while sweeping the aim side to side
+        // quickly, reversals and all.
+        let firing = run(&swinger, from: 2.5, seconds: 1, sample: leftJog { t in
+            let sweep = SIMD3<Float>(0.08 * sinf(2 * .pi * 2 * Float(t)), 0, 0)
+            return fingerGun(at: aimPoint + sweep, trigger: true)
+        })
+        #expect(firing.allSatisfy { !$0.rightSwinging && $0.engaged })
+    }
+
+    @Test("A gun hand that goes back to swinging a fist rejoins")
+    func gunHandRejoins() {
+        var swinger = RAVEArmSwinger()
+        _ = run(&swinger, seconds: 2, sample: jog())
+        _ = run(&swinger, from: 2, seconds: 0.5, sample: leftJog { _ in fingerGun(at: aimPoint) })
+        let back = run(&swinger, from: 2.5, seconds: 1.5, sample: jog())
+        let rejoined = back.firstIndex { $0.rightSwinging }
+        #expect(rejoined != nil)
+        #expect(Double(rejoined ?? 0) * frame >= 0.3)
+        #expect(back.suffix(30).allSatisfy { $0.rightSwinging && $0.leftSwinging })
+    }
+
+    @Test("Running on one arm, that arm's flick jumps")
+    func oneArmFlickJumps() {
+        var swinger = RAVEArmSwinger()
+        _ = run(&swinger, seconds: 2, sample: jog())
+        let oneArm = run(&swinger, from: 2, seconds: 1, sample: leftJog { _ in fingerGun(at: aimPoint) })
+        #expect(!oneArm.contains { $0.jumpBegan })
+        let base = jogWrists(t: 3, amplitude: 0.15, hertz: 1.5).0
+        let flick = run(&swinger, from: 3, seconds: 0.15) { t in
+            (hand(at: base + SIMD3(0, 2.5 * Float(t - 3), 0), fist: true), fingerGun(at: aimPoint))
+        }
+        #expect(flick.filter(\.jumpBegan).count == 1)
+    }
+
+    @Test("Stopping the last swinging arm stops the run")
+    func lastArmStops() {
+        var swinger = RAVEArmSwinger()
+        _ = run(&swinger, seconds: 2, sample: jog())
+        _ = run(&swinger, from: 2, seconds: 0.5, sample: leftJog { _ in fingerGun(at: aimPoint) })
+        // Stop where the arm is (a teleport would read as one last stroke).
+        let rest = jogWrists(t: 2.5, amplitude: 0.15, hertz: 1.5).0
+        let stop = run(&swinger, from: 2.5, seconds: 1) { _ in
+            (hand(at: rest, fist: false), fingerGun(at: aimPoint))
+        }
+        #expect(stop.last.map { !$0.engaged && $0.speed01 == 0 } == true)
     }
 
     @Test("Reset drops engagement")

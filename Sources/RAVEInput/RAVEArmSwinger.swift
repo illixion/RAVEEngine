@@ -18,6 +18,16 @@
    below the walking threshold, so opening your hands and stopping frees the
    gun hand at once rather than waiting out the pattern window.
 
+ **Each hand joins and leaves on its own.** Both hands start the swing, but once
+ moving either can carry it alone, so a player can keep running on one arm and
+ aim with the other. A hand leaves when both of its own signals lapse, or at
+ once when it makes a pointing pose (index out, the rest curled: a finger gun).
+ That pose is a deliberate signal, where a lapse could be tracking noise. A hand
+ that left rejoins only after it has been a swinging fist for `rejoinHold`, so
+ firing (an index curl) while sweeping the aim does not pull it back in. The
+ output reports which hands are swinging so the consumer knows which ones are
+ free.
+
  **Velocity is head-relative.** The wrist position has the head position
  subtracted before it is differentiated, so bobbing your head, or physically
  walking around the room, does not read as a swing. It is differentiated across
@@ -55,7 +65,17 @@ public struct RAVEArmSwingTuning: Sendable, Equatable {
     public var fistCurlThreshold: Float
     /// How many curled fingers make a fist. Matches the pinch detector's fist
     /// suppressor, which is what makes a fist and a pinch mutually exclusive.
+    /// The index must be among them: a finger gun has three curled fingers
+    /// and is not a fist.
     public var fistCurledFingerCount: Int
+    /// Index fingertip-to-metacarpal distance above which the index reads as
+    /// pointing.
+    public var pointExtension: Float
+    /// How long a pointing pose must hold before its hand leaves the swing.
+    /// Long enough to reject a tracking flicker, short enough to feel instant.
+    public var pointHold: TimeInterval
+    /// How long a hand that left must be a swinging fist before it rejoins.
+    public var rejoinHold: TimeInterval
     /// How far back the velocity estimate reaches.
     public var velocityWindow: TimeInterval
     /// How recently the stroke must have reversed for the swing pattern to
@@ -93,6 +113,9 @@ public struct RAVEArmSwingTuning: Sendable, Equatable {
     public init(
         fistCurlThreshold: Float = 0.06,
         fistCurledFingerCount: Int = 3,
+        pointExtension: Float = 0.08,
+        pointHold: TimeInterval = 0.08,
+        rejoinHold: TimeInterval = 0.3,
         velocityWindow: TimeInterval = 0.05,
         patternWindow: TimeInterval = 0.8,
         patternSpeed: Float = 0.4,
@@ -110,6 +133,9 @@ public struct RAVEArmSwingTuning: Sendable, Equatable {
     ) {
         self.fistCurlThreshold = fistCurlThreshold
         self.fistCurledFingerCount = fistCurledFingerCount
+        self.pointExtension = pointExtension
+        self.pointHold = pointHold
+        self.rejoinHold = rejoinHold
         self.velocityWindow = velocityWindow
         self.patternWindow = patternWindow
         self.patternSpeed = patternSpeed
@@ -151,8 +177,12 @@ public enum RAVEArmSwingSupport: String, Sendable {
 
 /// The arm swinger's reading for one frame.
 public struct RAVEArmSwingOutput: Sendable, Equatable {
-    /// True while arm swinging owns locomotion (and the hands with it).
+    /// True while arm swinging owns locomotion.
     public var engaged: Bool
+    /// Which hands are swinging, and so not free for anything else. At least
+    /// one is while `engaged`; either may be false while the other carries it.
+    public var leftSwinging: Bool
+    public var rightSwinging: Bool
     /// Head-relative (x = strafe, y = forward), magnitude clamped to 1.
     public var vector: SIMD2<Float>
     /// Smoothed speed, 0 to 1. The length of `vector`.
@@ -160,12 +190,15 @@ public struct RAVEArmSwingOutput: Sendable, Equatable {
     /// Stroke speed this frame, m/s: the peak hand speed of recent strokes,
     /// decaying between them.
     public var handSpeed: Float
-    /// Set on the frame both hands flicked upward together.
+    /// Set on the frame the swinging hands flicked upward together (the one
+    /// hand, when only one is swinging).
     public var jumpBegan: Bool
     public var support: RAVEArmSwingSupport
 
     public init(
         engaged: Bool = false,
+        leftSwinging: Bool = false,
+        rightSwinging: Bool = false,
         vector: SIMD2<Float> = .zero,
         speed01: Float = 0,
         handSpeed: Float = 0,
@@ -173,6 +206,8 @@ public struct RAVEArmSwingOutput: Sendable, Equatable {
         support: RAVEArmSwingSupport = .none
     ) {
         self.engaged = engaged
+        self.leftSwinging = leftSwinging
+        self.rightSwinging = rightSwinging
         self.vector = vector
         self.speed01 = speed01
         self.handSpeed = handSpeed
@@ -201,6 +236,18 @@ public struct RAVEArmSwinger: Sendable {
         var lastReversal: TimeInterval = -.infinity
         var lastFast: TimeInterval = -.infinity
         var lastUpFlick: TimeInterval = -.infinity
+        /// Participation, which outlives a tracking gap (the grace covers it),
+        /// so `clear()` leaves it alone.
+        var swinging = false
+        var lastSupported: TimeInterval = -.infinity
+        var pointSince: TimeInterval?
+        var rejoinSince: TimeInterval?
+
+        mutating func leave() {
+            swinging = false
+            pointSince = nil
+            rejoinSince = nil
+        }
 
         mutating func clear() {
             count = 0
@@ -241,7 +288,6 @@ public struct RAVEArmSwinger: Sendable {
     private var left = Track()
     private var right = Track()
     private var engaged = false
-    private var lastSupported: TimeInterval = -.infinity
     private var smoothed: Float = 0
     private var envelope: Float = 0
     private var lastUpdate: TimeInterval?
@@ -261,8 +307,9 @@ public struct RAVEArmSwinger: Sendable {
     public mutating func reset() {
         left.clear()
         right.clear()
+        left.leave()
+        right.leave()
         engaged = false
-        lastSupported = -.infinity
         smoothed = 0
         envelope = 0
         lastUpdate = nil
@@ -289,7 +336,9 @@ public struct RAVEArmSwinger: Sendable {
         let dt = lastUpdate.map { Float(max(0, min(now - $0, 0.25))) } ?? 0
         lastUpdate = now
 
-        func observe(_ sample: RAVEHandSample?, _ track: inout Track) -> (fist: Bool, pattern: Bool)? {
+        struct Reading { var fist: Bool; var pattern: Bool; var pointing: Bool }
+
+        func observe(_ sample: RAVEHandSample?, _ track: inout Track) -> Reading? {
             guard let sample,
                   sample.wrist.x.isFinite, sample.wrist.y.isFinite, sample.wrist.z.isFinite
             else {
@@ -309,51 +358,93 @@ public struct RAVEArmSwinger: Sendable {
                 track.strokeSign = sign
             }
             if v.y >= t.jumpSpeed { track.lastUpFlick = now }
-            let fist = sample.curledFingerCount(threshold: t.fistCurlThreshold) >= t.fistCurledFingerCount
+            let indexCurled = sample.index.extension_ < t.fistCurlThreshold
+            let curled = sample.curledFingerCount(threshold: t.fistCurlThreshold)
+            let fist = indexCurled && curled >= t.fistCurledFingerCount
+            // Index out with the other three mostly curled: a finger gun.
+            let pointing = sample.index.extension_ > t.pointExtension && curled >= 2
             let pattern = now - track.lastReversal <= t.patternWindow
                 && now - track.lastFast <= t.fastWindow
-            return (fist, pattern)
+            return Reading(fist: fist, pattern: pattern, pointing: pointing)
         }
 
         let l = observe(leftSample, &left)
         let r = observe(rightSample, &right)
         let trackedCount = (l == nil ? 0 : 1) + (r == nil ? 0 : 1)
 
-        // Mean speed over the hands we can see, so losing one hand halves
-        // nothing.
-        var handSpeed: Float = 0
-        if l != nil { handSpeed += simd_length(left.velocity) }
-        if r != nil { handSpeed += simd_length(right.velocity) }
-        if trackedCount > 0 { handSpeed /= Float(trackedCount) }
-
-        // Every tracked hand a fist, and at least one tracked. An untracked
-        // hand does not veto: jogging arms swing in and out of the cameras.
-        let allFists = trackedCount > 0 && (l?.fist ?? true) && (r?.fist ?? true)
-        let anyFist = (l?.fist ?? false) || (r?.fist ?? false)
-        let pattern = ((l?.pattern ?? false) || (r?.pattern ?? false))
-
-        var support: RAVEArmSwingSupport = .none
+        // Engage: every tracked hand a swinging-ready fist, and at least one
+        // tracked. An untracked hand does not veto (jogging arms swing in and
+        // out of the cameras). Both hands join, the unseen one on credit: the
+        // grace drops it if it never shows up.
         if !engaged {
+            let allFists = trackedCount > 0 && (l?.fist ?? true) && (r?.fist ?? true)
+            let pattern = (l?.pattern ?? false) || (r?.pattern ?? false)
             if allFists && pattern {
                 engaged = true
-                support = .both
+                func join(_ track: inout Track) {
+                    track.leave()
+                    track.swinging = true
+                    track.lastSupported = now
+                }
+                join(&left)
+                join(&right)
             }
-        } else if anyFist && pattern {
-            support = .both
-        } else if anyFist {
-            support = .fist
-        } else if pattern {
-            support = .pattern
-        }
-        if support != .none {
-            lastSupported = now
-        } else if engaged {
-            if now - lastSupported <= t.grace {
-                support = .grace
-            } else {
-                engaged = false
+        } else {
+            // Each hand on its own: stay while either of its signals holds,
+            // leave on a lapse past the grace or on a held pointing pose,
+            // rejoin after being a swinging fist for a while.
+            func advance(_ track: inout Track, _ reading: Reading?) {
+                if track.swinging {
+                    if let reading, reading.pointing {
+                        if track.pointSince == nil { track.pointSince = now }
+                        if now - track.pointSince! >= t.pointHold { track.leave(); return }
+                    } else {
+                        track.pointSince = nil
+                    }
+                    if let reading, reading.fist || reading.pattern {
+                        track.lastSupported = now
+                    } else if now - track.lastSupported > t.grace {
+                        track.leave()
+                    }
+                } else if let reading, reading.fist, reading.pattern, !reading.pointing {
+                    if track.rejoinSince == nil { track.rejoinSince = now }
+                    if now - track.rejoinSince! >= t.rejoinHold {
+                        track.swinging = true
+                        track.lastSupported = now
+                        track.rejoinSince = nil
+                    }
+                } else {
+                    track.rejoinSince = nil
+                }
             }
+            advance(&left, l)
+            advance(&right, r)
+            engaged = left.swinging || right.swinging
         }
+        if !engaged {
+            left.leave()
+            right.leave()
+        }
+
+        // What holds the swing, over the swinging hands.
+        var support: RAVEArmSwingSupport = .none
+        if engaged {
+            var anyFist = false, anyPattern = false
+            if left.swinging, let l { anyFist = anyFist || l.fist; anyPattern = anyPattern || l.pattern }
+            if right.swinging, let r { anyFist = anyFist || r.fist; anyPattern = anyPattern || r.pattern }
+            support = anyFist && anyPattern ? .both
+                : anyFist ? .fist
+                : anyPattern ? .pattern
+                : .grace
+        }
+
+        // Mean speed over the swinging hands we can see, so a hand that is
+        // aiming, or out of view, halves nothing.
+        var handSpeed: Float = 0
+        var speedCount = 0
+        if l != nil, left.swinging || !engaged { handSpeed += simd_length(left.velocity); speedCount += 1 }
+        if r != nil, right.swinging || !engaged { handSpeed += simd_length(right.velocity); speedCount += 1 }
+        if speedCount > 0 { handSpeed /= Float(speedCount) }
 
         // Speed comes from the stroke, not the instant. A hand's speed runs
         // from zero at each end of a stroke to its peak mid-stroke, so the
@@ -381,7 +472,8 @@ public struct RAVEArmSwinger: Sendable {
                 let p = sample.middle.knuckle - sample.wrist
                 return p.x.isFinite && p.z.isFinite ? p : .zero
             }
-            let sum = pointing(leftSample) + pointing(rightSample)
+            let sum = (left.swinging ? pointing(leftSample) : .zero)
+                    + (right.swinging ? pointing(rightSample) : .zero)
             let planar = SIMD2(simd_dot(sum, basis.right), simd_dot(sum, basis.forward))
             let length = simd_length(planar)
             if length > 1e-3 {
@@ -391,19 +483,30 @@ public struct RAVEArmSwinger: Sendable {
             dir = heading
         }
 
-        // Jump: both hands flick up together. A jogging stroke is anti-phase,
-        // so both hands rising fast at once is the flick and not the gait.
+        // Jump: the swinging hands flick up together. A jogging stroke is
+        // anti-phase, so both hands rising fast at once is the flick and not
+        // the gait. One hand swinging alone has no partner to check against,
+        // so its own flick counts; the flick speed sits well above a stroke's
+        // vertical speed.
         var jumpBegan = false
-        if engaged,
-           abs(left.lastUpFlick - right.lastUpFlick) <= t.jumpPairWindow,
-           now - max(left.lastUpFlick, right.lastUpFlick) <= t.jumpPairWindow,
-           now - lastJump >= t.jumpCooldown {
+        let flicked: Bool
+        switch (left.swinging, right.swinging) {
+        case (true, true):
+            flicked = abs(left.lastUpFlick - right.lastUpFlick) <= t.jumpPairWindow
+                && now - max(left.lastUpFlick, right.lastUpFlick) <= t.jumpPairWindow
+        case (true, false): flicked = now - left.lastUpFlick <= t.jumpPairWindow
+        case (false, true): flicked = now - right.lastUpFlick <= t.jumpPairWindow
+        case (false, false): flicked = false
+        }
+        if engaged, flicked, now - lastJump >= t.jumpCooldown {
             jumpBegan = true
             lastJump = now
         }
 
         return RAVEArmSwingOutput(
             engaged: engaged,
+            leftSwinging: left.swinging,
+            rightSwinging: right.swinging,
             vector: dir * smoothed,
             speed01: smoothed,
             handSpeed: envelope,
