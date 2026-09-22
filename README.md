@@ -130,6 +130,7 @@ to pose a Half-Life player model from a tracked head and hands.
 | `FABRIK` | Forward And Backward Reaching IK over a chain of points, with a pole constraint and reach/fold limits. Any number of segments. |
 | `PoseSolver` | Turns a FABRIK solution back into joint rotations, which is what a skeleton actually stores. |
 | `LegStepper` | Plans footfalls — where each foot plants, when it lifts, the arc it swings through. |
+| `FootPlanter` | Feet for a body that does not walk where it faces — a tracked VR player: each foot holds still until it drifts from its stance beside the hips, then steps, one at a time. Strafing, backpedalling and turning on the spot never cross the legs, which is what a walk cycle laid along the travel direction does. |
 | `TailArchitecture` | Finds a tail from geometry: a weighted chain of joints leaving the pelvis backward or down, that is not a limb. |
 | `ChainDynamics` | Verlet particle chain for secondary motion — a tail, an ear, a strap — with gravity, a spring toward the animated shape, fixed lengths, a bend limit and a floor. |
 | `TailSway` | The deliberate half of a tail: a wag about the base and a carriage height, eased between styles. |
