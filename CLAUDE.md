@@ -91,7 +91,7 @@ Two of the three input consumers and two of the four diagnostics consumers poll 
 **render thread that cannot await anything** — Lambda's renderer, Longwave's 90 Hz datagram
 loop. The other consumers drive the same code from `@MainActor`. So:
 
-- `RAVEPinchDetector`, `RAVEHandJoystick`, `RAVEPalmGeometry`, `RAVEEdgeTracker`,
+- `RAVEPinchDetector`, `RAVEHandJoystick`, `RAVEArmSwinger`, `RAVEPalmGeometry`, `RAVEEdgeTracker`,
   `RAVESampleSeries` are **isolation-free value types**
 - `RAVEMetricCollector` is a **lock-guarded class**, `@unchecked Sendable` — an actor would
   make `record()` async and unusable from exactly the callers that need it most
@@ -134,6 +134,14 @@ resolution silently picked the lossy one.
 overload and `RAVEARKitHandSensor` construct it for older callers. Do not project an ARKit
 hand position against a game-world basis that has already had the game's yaw applied.
 The output is head-relative and the game may rotate that 2D value into its world afterward.
+
+**`RAVEArmSwinger` only reaches full deflection; it never scales it.** It is H3VR's arm
+swinger over hand tracking: both fists plus a swing pattern engage it, either one keeps it
+engaged (tracking drops fists mid-stroke), and speed comes from a stroke-peak envelope,
+because the mean speed of a sinusoidal stroke is 64% of its peak and a ramp fed instantaneous
+speed can never hold 1.0. Its output is the joystick's shape, and what 1.0 means belongs to
+the game. `scaled(sensitivity:)` changes the effort needed, never the top speed. LambdaVision
+is the only consumer so far.
 
 The shared default deadzone is 3 cm. Zero made normal ARKit wrist jitter into movement in
 the two consumers that did not override it; Lambda's long-standing 3 cm setting was the
