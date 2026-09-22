@@ -18,6 +18,7 @@ let package = Package(
         .library(name: "RAVEInput", targets: ["RAVEInput"]),
         .library(name: "RAVEDiagnostics", targets: ["RAVEDiagnostics"]),
         .library(name: "RAVERig", targets: ["RAVERig"]),
+        .library(name: "RAVEHolo", targets: ["RAVEHolo"]),
     ],
     targets: [
         .target(name: "RAVEInput"),
@@ -31,5 +32,12 @@ let package = Package(
         // written without naming a framework belongs in that app's adapter.
         .target(name: "RAVERig"),
         .testTarget(name: "RAVERigTests", dependencies: ["RAVERig"]),
+        // In-world holographic UI: panels, gauges and SDF text drawn in Metal
+        // into a pass the host app owns (Compositor Services has no RealityKit,
+        // so this is how an immersive Metal app gets hand- and object-anchored
+        // readouts). Layout and the glyph atlas are CPU-side and host-tested;
+        // the renderer compiles its shader source at runtime.
+        .target(name: "RAVEHolo"),
+        .testTarget(name: "RAVEHoloTests", dependencies: ["RAVEHolo"]),
     ]
 )
