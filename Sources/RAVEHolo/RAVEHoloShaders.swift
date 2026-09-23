@@ -18,7 +18,7 @@ enum RAVEHoloShaders {
     };
     struct HoloPanelGPU {
         float4x4 model;
-        float4 params;          // x = opacity, y = seed
+        float4 params;          // x = opacity, y = seed, z = brightness
     };
     struct HoloQuadGPU {
         float4 rect;            // min x, min y, width, height (panel metres)
@@ -92,16 +92,27 @@ enum RAVEHoloShaders {
         case 2: {   // bar: lit up to the fraction, dim beyond; optional segments
             const float t = in.inQuad.x / max(q.rect.z, 1e-5);
             const float segments = q.params.y;
+            const float corner = q.params.w;
             float inSeg = 1;
-            float at = t;
+            float lit;
             if (segments > 0.5) {
                 const float cell = q.rect.z / segments;
                 const float x = fmod(in.inQuad.x, cell);
-                inSeg = smoothstep(0.0, aa, x - q.params.z * 0.5) * (1.0 - smoothstep(0.0, aa, x - (cell - q.params.z * 0.5)));
+                const float2 segHalf = float2(max(cell - q.params.z, 1e-5) * 0.5, half_.y);
+                inSeg = 1.0 - smoothstep(-aa, aa, roundedBox(float2(x - cell * 0.5, p.y), segHalf,
+                                                             min(corner, min(segHalf.x, segHalf.y))));
                 // Whole segments: one lights once the fill passes its centre.
-                at = (floor(t * segments) + 0.5) / segments;
+                lit = (floor(t * segments) + 0.5) / segments <= q.params.x ? 1.0 : 0.18;
+            } else {
+                // One rounded gauge; the lit part is rounded the same, so its
+                // leading end reads as a capsule, not a cut.
+                inSeg = 1.0 - smoothstep(-aa, aa, roundedBox(p, half_, min(corner, min(half_.x, half_.y))));
+                const float litHalf = q.rect.z * q.params.x * 0.5;
+                const float litMask = litHalf <= 0.0 ? 0.0 :
+                    1.0 - smoothstep(-aa, aa, roundedBox(float2(in.inQuad.x - litHalf, p.y), float2(litHalf, half_.y),
+                                                         min(corner, min(litHalf, half_.y))));
+                lit = mix(0.18, 1.0, litMask);
             }
-            const float lit = at <= q.params.x ? 1.0 : 0.18;
             coverage = inSeg * lit;
             glow = inSeg * lit * 0.15;
             break;
@@ -121,7 +132,7 @@ enum RAVEHoloShaders {
                                                    * (0.5 + 0.5 * sin(time * 3.1 + panel.params.y));
         const float a = saturate(max(coverage, glow)) * q.color.a * panel.params.x * flicker;
         if (a <= 0.002) discard_fragment();
-        const float3 rgb = q.color.rgb * scan * (coverage + glow * (1.0 - coverage));
+        const float3 rgb = q.color.rgb * scan * (coverage + glow * (1.0 - coverage)) * panel.params.z;
         // Premultiplied; the fill kind carries real alpha (it is the dark
         // backing), everything else adds light over whatever is behind.
         const float occlusion = q.kind == 0 ? a : a * 0.35;

@@ -173,4 +173,104 @@ import simd
             }
         }
     }
+
+    /// Renders `scene` orthographically over an 8.4 × 4.2 cm window onto
+    /// black and returns linear RGBA, row 0 at the top. Nil without Metal 4.
+    private func renderOnBlack(_ scene: RAVEHoloScene, width w: Int = 512) throws -> [Float]? {
+        guard #available(macOS 26.0, *), let device = MTLCreateSystemDefaultDevice(),
+              let queue = device.makeMTL4CommandQueue(), let commandBuffer = device.makeCommandBuffer(),
+              let allocator = device.makeCommandAllocator() else { return nil }
+        let h = w / 2
+        let cd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: w, height: h, mipmapped: false)
+        cd.usage = [.renderTarget, .shaderRead]
+        cd.storageMode = .shared
+        let dd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .depth32Float, width: w, height: h, mipmapped: false)
+        dd.usage = .renderTarget
+        dd.storageMode = .private
+        let color = try #require(device.makeTexture(descriptor: cd))
+        let depth = try #require(device.makeTexture(descriptor: dd))
+        var holo = try RAVEHoloRenderer(device: device,
+                                        configuration: .init(colorFormat: .rgba16Float, depthFormat: .depth32Float,
+                                                             maxViewCount: 1, slots: 1),
+                                        font: RAVEHoloTests.font)
+        holo.style.flickerDepth = 0   // flat light, so pixels compare exactly
+        holo.style.scanlineDepth = 0
+        var vp = matrix_identity_float4x4
+        vp.columns.0.x = 2 / 0.084
+        vp.columns.1.y = 2 / 0.042
+        vp.columns.2.z = 0.5
+        vp.columns.3.z = 0.5
+        let residency = try device.makeResidencySet(descriptor: MTLResidencySetDescriptor())
+        residency.addAllocations(holo.allocations + [color, depth])
+        residency.commit()
+        commandBuffer.beginCommandBuffer(allocator: allocator)
+        commandBuffer.useResidencySet(residency)
+        let pass = MTL4RenderPassDescriptor()
+        pass.colorAttachments[0].texture = color
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        pass.colorAttachments[0].storeAction = .store
+        pass.depthAttachment.texture = depth
+        pass.depthAttachment.loadAction = .clear
+        pass.depthAttachment.clearDepth = 0
+        pass.depthAttachment.storeAction = .dontCare
+        let enc = try #require(commandBuffer.makeRenderCommandEncoder(descriptor: pass))
+        enc.setViewport(MTLViewport(originX: 0, originY: 0, width: Double(w), height: Double(h), znear: 0, zfar: 1))
+        holo.encode(scene, encoder: enc, viewProjections: [vp], slot: 0, time: 0)
+        enc.endEncoding()
+        commandBuffer.endCommandBuffer()
+        let done = DispatchSemaphore(value: 0)
+        let options = MTL4CommitOptions()
+        options.addFeedbackHandler { _ in done.signal() }
+        queue.commit([commandBuffer], options: options)
+        done.wait()
+        var halfs = [UInt16](repeating: 0, count: w * h * 4)
+        halfs.withUnsafeMutableBytes { raw in
+            color.getBytes(raw.baseAddress!, bytesPerRow: w * 8, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
+        }
+        return halfs.map { Float(Float16(bitPattern: $0)) }
+    }
+
+    /// Red channel at panel metres (x, y) in a `renderOnBlack` image.
+    private func red(_ img: [Float], x: Float, y: Float, width w: Int = 512) -> Float {
+        let h = w / 2
+        let px = Int((x / 0.084 + 0.5) * Float(w)), py = Int((0.5 - y / 0.042) * Float(h))
+        return img[(py * w + px) * 4]
+    }
+
+    private func gauge(corner: Float, brightness: Float = 1, fraction: Float = 1) -> RAVEHoloScene {
+        var panel = RAVEHoloPanel(transform: matrix_identity_float4x4)
+        panel.brightness = brightness
+        panel.bar(x: -0.04, y: -0.01, width: 0.08, height: 0.02, fraction: fraction,
+                  corner: corner, color: SIMD4(1, 0.56, 0.12, 1))
+        var scene = RAVEHoloScene()
+        scene.panels = [panel]
+        return scene
+    }
+
+    @Test func roundedGaugeClearsItsCorners() throws {
+        guard let square = try renderOnBlack(gauge(corner: 0)),
+              let round = try renderOnBlack(gauge(corner: 0.01)) else { return }
+        // The corner itself: lit on a square gauge, outside a capsule.
+        #expect(red(square, x: -0.0395, y: 0.0092) > 0.5)
+        #expect(red(round, x: -0.0395, y: 0.0092) < 0.05)
+        // The middle of the capsule's end cap is still lit.
+        #expect(red(round, x: -0.0395, y: 0) > 0.5)
+    }
+
+    @Test func gaugeLitPartEndsInACap() throws {
+        guard let img = try renderOnBlack(gauge(corner: 0.01, fraction: 0.5)) else { return }
+        // Lit half ends at x = 0 in a cap: its tip on the centre line is lit,
+        // the corner of that end is dim (the 18% unlit remainder).
+        #expect(red(img, x: -0.0015, y: 0) > 0.5)
+        #expect(red(img, x: -0.0015, y: 0.0092) < 0.3)
+    }
+
+    @Test func brightnessScalesTheEmittedLight() throws {
+        guard let full = try renderOnBlack(gauge(corner: 0)),
+              let dim = try renderOnBlack(gauge(corner: 0, brightness: 0.4)) else { return }
+        let a = red(full, x: -0.02, y: 0), b = red(dim, x: -0.02, y: 0)
+        #expect(a > 0.5)
+        #expect(abs(b / a - 0.4) < 0.02)
+    }
 }

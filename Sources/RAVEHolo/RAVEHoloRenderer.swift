@@ -144,7 +144,7 @@ public final class RAVEHoloRenderer {
             .bindMemory(to: QuadGPU.self, capacity: configuration.maxQuads)
         var quadCount = 0
         for (pi, panel) in scene.panels.prefix(configuration.maxPanels).enumerated() {
-            panels[pi] = PanelGPU(model: panel.transform, params: SIMD4(panel.opacity, panel.seed, 0, 0))
+            panels[pi] = PanelGPU(model: panel.transform, params: SIMD4(panel.opacity, panel.seed, max(0, panel.brightness), 0))
             for q in panel.quads {
                 guard quadCount < configuration.maxQuads else { break }
                 quads[quadCount] = QuadGPU(rect: q.rect, params: q.params, color: q.color,
