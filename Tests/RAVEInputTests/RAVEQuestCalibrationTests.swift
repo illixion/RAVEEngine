@@ -214,7 +214,7 @@ struct RAVEQuestCalibrationTests {
 
     /// Wide wrist rotation during the sampling is the realistic case: the
     /// offset term no longer vanishes at the per-hand centroid when the
-    /// controller spins. The Longwave C++ original's three alternating rounds
+    /// controller spins. The original C++ solver's three alternating rounds
     /// left ~4 mm RMS and ~0.6° of yaw on exactly this ring (residual
     /// 4.051619 mm, yaw -0.861960 against a true -0.872665); `offsetRounds` = 20
     /// converges it to float noise, and this test holds it there — dropping the

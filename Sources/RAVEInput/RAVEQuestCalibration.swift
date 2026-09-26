@@ -37,8 +37,9 @@
      tracks drift instead of averaging the whole session into a stale mean.
 
  Ported from the Longwave PCVR host's C++ solver, constants and all; the unit
- tests are ported with it. One deliberate departure: `offsetRounds` is 20, not
- the original's 3, so the offset solve converges under wide wrist rotation. Pure arithmetic, an isolation-free value type: the
+ tests are ported with it. `offsetRounds` is 20 on both sides (raised from the
+ original 3 so the offset solve converges under wide wrist rotation); only the
+ early exit on convergence is Swift's own. Pure arithmetic, an isolation-free value type: the
  owner calls it from whatever thread samples the hands.
 
  Rotation convention, everywhere in this file: yaw is a right-handed rotation
@@ -80,8 +81,9 @@ public struct RAVEQuestCalibration: Sendable {
     /// case: the offset term then leans the yaw and each round only removes
     /// part of that lean. On the widely rotating test ring three rounds left
     /// ~4 mm RMS and ~0.6° of yaw; 20 reach float noise. Raised deliberately
-    /// (2026-09-26), a behaviour change from the C++ host, pinned by the
-    /// convergence test. Rounds stop early once the offsets settle
+    /// (2026-09-26) together with the C++ host's `kOffsetRounds`, pinned by the
+    /// convergence test. The host always runs all 20; this exits early (below)
+    /// because it solves under the source's lock. Rounds stop early once the offsets settle
     /// (`offsetConvergedMeters`), and the worst case — both 120-sample rings
     /// full, every robust pass taken — measured ~0.2 ms optimised (~7.5 ms in
     /// an -Onone debug build), once per `resolveEverySamples` new pairs. That
