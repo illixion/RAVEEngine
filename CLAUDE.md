@@ -210,7 +210,7 @@ is A/X/Cross/Square) with capacitive touch bits gated by `touchValid`, battery. 
 - **`RAVESpatialAccessorySource`** (visionOS only) — lifted from Longwave's
   `SpatialAccessoryTracker`: `GCProductCategorySpatialController` + ARKit
   `AccessoryTrackingProvider`, chirality from `heldChirality ?? inherentChirality`, CoreHaptics
-  per side. **Never run on hardware.** Longwave still carries its own copy until it adopts this.
+  per side. **Never run on hardware.** Longwave adopted it (replacing its own copy) on 2026-09-26.
 - **`RAVEQuestBridgeSource`** — a Quest on the desk running the Controller Bridge app streams
   Touch controllers over UDP :9520. Opt-in: nothing listens until `start()`. Once started it
   advertises `_controllerbridge._udp` (default on, `advertise = false` opts out) and answers
