@@ -65,50 +65,6 @@ public extension RAVEHandSample {
     }
 }
 
-/// Both hands' readings for one frame.
-public struct RAVEHandTickOutput: Sendable {
-    public var left: RAVEPinchOutput
-    public var right: RAVEPinchOutput
-    /// The locomotion joystick, driven by whichever pinch the sensor reserves
-    /// for it (left + index by default).
-    public var joystick: RAVEJoystickOutput
-
-    public init(
-        left: RAVEPinchOutput = RAVEPinchOutput(),
-        right: RAVEPinchOutput = RAVEPinchOutput(),
-        joystick: RAVEJoystickOutput = RAVEJoystickOutput()
-    ) {
-        self.left = left
-        self.right = right
-        self.joystick = joystick
-    }
-
-    public subscript(chirality: RAVEHandChirality) -> RAVEPinchOutput {
-        switch chirality {
-        case .left:  return left
-        case .right: return right
-        }
-    }
-
-    /// Rising edges from both hands, in left-then-right order (the order the
-    /// ported originals emitted them in).
-    public var pinchEvents: [RAVEHandPinchEvent] {
-        var events: [RAVEHandPinchEvent] = []
-        if let event = left.pinchEvent(for: .left) { events.append(event) }
-        if let event = right.pinchEvent(for: .right) { events.append(event) }
-        return events
-    }
-
-    /// The additive-input view of this frame.
-    public var inputFrame: RAVEHandInputFrame {
-        RAVEHandInputFrame(
-            pinchEvents: pinchEvents,
-            joystick: joystick.vector,
-            joystickVisualization: joystick.visualization
-        )
-    }
-}
-
 /// ARKit-backed hand sensing.
 @MainActor
 public final class RAVEARKitHandSensor: RAVEHandInputProvider {
@@ -116,10 +72,25 @@ public final class RAVEARKitHandSensor: RAVEHandInputProvider {
     // MARK: Configuration
 
     /// Which pinch drives the locomotion joystick. That pinch is still reported
-    /// as held like any other; it is up to the app's binding table to leave it
-    /// unassigned.
+    /// as *held* in `left`/`right` like any other — Longwave maps a held left
+    /// pinch of any finger to its wire-level `leftPinch` flag, joystick
+    /// included, so hiding it there would change what its host sees. Its
+    /// rising edge is left out of `pinchEvents`.
     public var joystickChirality: RAVEHandChirality = .left
     public var joystickFinger: RAVEHandFinger = .index
+    /// When false the sensor reserves nothing: every pinch is bindable and the
+    /// joystick output stays zero. An app without hand locomotion wants this.
+    public var joystickEnabled: Bool = true {
+        didSet { if !joystickEnabled { joystick.release(); joystickDetector?.reset() } }
+    }
+    /// Optional dedicated tuning for the joystick pinch (e.g. `.joystick`, a
+    /// heavier debounce than a button wants). `nil`, the default, drives the
+    /// joystick from the hand's ordinary detector, as before. When set, a
+    /// second detector restricted to `joystickFinger` engages the stick; the
+    /// ordinary detector still reports the finger as held on its own timing.
+    public var joystickPinchTuning: RAVEPinchTuning? {
+        didSet { joystickDetector = joystickPinchTuning.map(Self.makeJoystickDetector) }
+    }
 
     /// Hands whose pinches must not reach the app. Longwave sets this while its
     /// wrist panel is up: the same pinch that presses a button on the panel is
@@ -139,6 +110,7 @@ public final class RAVEARKitHandSensor: RAVEHandInputProvider {
 
     private var leftDetector: RAVEPinchDetector
     private var rightDetector: RAVEPinchDetector
+    private var joystickDetector: RAVEPinchDetector?
     private var leftSample: RAVEHandSample?
     private var rightSample: RAVEHandSample?
 
@@ -157,6 +129,28 @@ public final class RAVEARKitHandSensor: RAVEHandInputProvider {
         self.leftDetector = RAVEPinchDetector(tuning: pinchTuning)
         self.rightDetector = RAVEPinchDetector(tuning: pinchTuning)
         self.logHandler = log
+    }
+
+    /// Full configuration, including the joystick reservation.
+    public convenience init(
+        pinchTuning: RAVEPinchTuning = .standard,
+        joystick: RAVEHandJoystick = RAVEHandJoystick(),
+        joystickEnabled: Bool,
+        joystickChirality: RAVEHandChirality = .left,
+        joystickFinger: RAVEHandFinger = .index,
+        joystickPinchTuning: RAVEPinchTuning? = nil,
+        log: (@Sendable (String) -> Void)? = nil
+    ) {
+        self.init(pinchTuning: pinchTuning, joystick: joystick, log: log)
+        self.joystickEnabled = joystickEnabled
+        self.joystickChirality = joystickChirality
+        self.joystickFinger = joystickFinger
+        self.joystickPinchTuning = joystickPinchTuning
+        self.joystickDetector = joystickPinchTuning.map(Self.makeJoystickDetector)
+    }
+
+    private nonisolated static func makeJoystickDetector(_ tuning: RAVEPinchTuning) -> RAVEPinchDetector {
+        RAVEPinchDetector(tuning: tuning)
     }
 
     // MARK: Lifecycle
@@ -196,11 +190,13 @@ public final class RAVEARKitHandSensor: RAVEHandInputProvider {
         rightSample = nil
         leftDetector.reset()
         rightDetector.reset()
+        joystickDetector?.reset()
         joystick.release()
     }
 
     /// Push in an anchor observed elsewhere. An untracked anchor clears that
-    /// hand, which releases any pinch it was holding.
+    /// hand; a pinch it was holding survives the tuning's tracking-loss grace
+    /// and then releases.
     public func ingest(_ anchor: HandAnchor) {
         let sample = anchor.isTracked ? RAVEHandSample(anchor) : nil
         switch anchor.chirality {
@@ -240,10 +236,24 @@ public final class RAVEARKitHandSensor: RAVEHandInputProvider {
         now: TimeInterval = CACurrentMediaTime(),
         trackingBasis: RAVEPlanarBasis
     ) -> RAVEHandTickOutput {
-        let left = leftDetector.update(sample: input(for: .left), now: now)
-        let right = rightDetector.update(sample: input(for: .right), now: now)
+        let left = advance(&leftDetector, .left, now: now)
+        let right = advance(&rightDetector, .right, now: now)
 
-        let driving = (joystickChirality == .left ? left : right)
+        guard joystickEnabled else {
+            joystick.release()
+            return RAVEHandTickOutput(left: left, right: right)
+        }
+
+        var dedicated: RAVEPinchOutput?
+        if var detector = joystickDetector {
+            // The dedicated detector only ever looks at the joystick finger.
+            if detector.tuning.candidateFingers != [joystickFinger] {
+                detector.tuning.candidateFingers = [joystickFinger]
+            }
+            dedicated = advance(&detector, joystickChirality, now: now)
+            joystickDetector = detector
+        }
+        let driving = dedicated ?? (joystickChirality == .left ? left : right)
         let engaged = driving.held == joystickFinger
         let wrist = (joystickChirality == .left ? leftSample : rightSample)?.wrist
         let stick = joystick.update(
@@ -252,7 +262,19 @@ public final class RAVEARKitHandSensor: RAVEHandInputProvider {
             basis: trackingBasis
         )
 
-        return RAVEHandTickOutput(left: left, right: right, joystick: stick)
+        return RAVEHandTickOutput(
+            left: left, right: right, joystick: stick,
+            joystickSlot: RAVEHandPinchEvent(chirality: joystickChirality, finger: joystickFinger),
+            joystickPinch: dedicated
+        )
+    }
+
+    /// One detector, one frame. A suppressed hand releases at once (suppression
+    /// is deliberate and must not linger); an untracked one gets the grace.
+    private func advance(_ detector: inout RAVEPinchDetector, _ hand: RAVEHandChirality,
+                         now: TimeInterval) -> RAVEPinchOutput {
+        if suppressedHands.contains(hand) { return detector.forceRelease() }
+        return detector.update(sample: sample(for: hand), now: now)
     }
 
     /// `RAVEHandInputProvider` witness — the additive-input view, on the media clock.
@@ -284,10 +306,6 @@ public final class RAVEARKitHandSensor: RAVEHandInputProvider {
         }
     }
 
-    private func input(for chirality: RAVEHandChirality) -> RAVEHandSample? {
-        guard !suppressedHands.contains(chirality) else { return nil }
-        return sample(for: chirality)
-    }
 }
 
 #endif

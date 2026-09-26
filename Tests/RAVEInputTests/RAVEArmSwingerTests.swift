@@ -308,9 +308,11 @@ struct RAVEArmSwingerTests {
         #expect(back.suffix(30).allSatisfy { $0.rightSwinging && $0.leftSwinging })
     }
 
-    @Test("Running on one arm, that arm's flick jumps")
+    @Test("Running on one arm, that arm's flick jumps when opted in")
     func oneArmFlickJumps() {
-        var swinger = RAVEArmSwinger()
+        var tuning = RAVEArmSwingTuning()
+        tuning.oneArmJump = true
+        var swinger = RAVEArmSwinger(tuning: tuning)
         _ = run(&swinger, seconds: 2, sample: jog())
         let oneArm = run(&swinger, from: 2, seconds: 1, sample: leftJog { _ in fingerGun(at: aimPoint) })
         #expect(!oneArm.contains { $0.jumpBegan })
@@ -319,6 +321,82 @@ struct RAVEArmSwingerTests {
             (hand(at: base + SIMD3(0, 2.5 * Float(t - 3), 0), fist: true), fingerGun(at: aimPoint))
         }
         #expect(flick.filter(\.jumpBegan).count == 1)
+    }
+
+    @Test("Running on one arm, a flick does not jump by default")
+    func oneArmFlickOffByDefault() {
+        var swinger = RAVEArmSwinger()
+        _ = run(&swinger, seconds: 2, sample: jog())
+        _ = run(&swinger, from: 2, seconds: 1, sample: leftJog { _ in fingerGun(at: aimPoint) })
+        let base = jogWrists(t: 3, amplitude: 0.15, hertz: 1.5).0
+        let flick = run(&swinger, from: 3, seconds: 0.15) { t in
+            (hand(at: base + SIMD3(0, 2.5 * Float(t - 3), 0), fist: true), fingerGun(at: aimPoint))
+        }
+        #expect(!flick.contains { $0.jumpBegan })
+    }
+
+    @Test("Swinging both fists in phase (a shove, a pull) does not engage")
+    func inPhaseRejected() {
+        var swinger = RAVEArmSwinger()
+        let out = run(&swinger, seconds: 3) { t in
+            let (l, _) = jogWrists(t: t, amplitude: 0.15, hertz: 1.5)
+            // The right hand mirrors the left's stroke instead of opposing it.
+            return (hand(at: l, fist: true), hand(at: l + SIMD3(0.4, 0, 0), fist: true))
+        }
+        #expect(out.allSatisfy { !$0.engaged })
+        #expect(swinger.phaseAgreement > 0.5)
+    }
+
+    @Test("In-phase swinging engages when the phase check is off")
+    func inPhaseAllowedWhenOptedOut() {
+        var tuning = RAVEArmSwingTuning()
+        tuning.requireOppositePhase = false
+        var swinger = RAVEArmSwinger(tuning: tuning)
+        let out = run(&swinger, seconds: 3) { t in
+            let (l, _) = jogWrists(t: t, amplitude: 0.15, hertz: 1.5)
+            return (hand(at: l, fist: true), hand(at: l + SIMD3(0.4, 0, 0), fist: true))
+        }
+        #expect(out.suffix(30).allSatisfy { $0.engaged })
+    }
+
+    @Test("A single back-and-forth flick of both fists does not engage")
+    func singleFlickRejected() {
+        var swinger = RAVEArmSwinger()
+        // Half a jog cycle (one reversal each), then still.
+        let out = run(&swinger, seconds: 1.5) { t in
+            let tt = min(t, 0.5)
+            let (l, r) = jogWrists(t: tt, amplitude: 0.15, hertz: 1.5)
+            return (hand(at: l, fist: true), hand(at: r, fist: true))
+        }
+        #expect(out.allSatisfy { !$0.engaged })
+
+        var legacy = RAVEArmSwinger(tuning: .legacy)
+        let old = run(&legacy, seconds: 1.5) { t in
+            let tt = min(t, 0.5)
+            let (l, r) = jogWrists(t: tt, amplitude: 0.15, hertz: 1.5)
+            return (hand(at: l, fist: true), hand(at: r, fist: true))
+        }
+        #expect(old.contains { $0.engaged })
+    }
+
+    @Test("One tracked fist jogging alone cannot start a run by default")
+    func oneHandCannotEngage() {
+        var swinger = RAVEArmSwinger()
+        let out = run(&swinger, seconds: 3) { t in
+            let (l, _) = jogWrists(t: t, amplitude: 0.15, hertz: 1.5)
+            return (hand(at: l, fist: true), nil)
+        }
+        #expect(out.allSatisfy { !$0.engaged })
+    }
+
+    @Test("Engaging takes at least two reversals")
+    func engageNeedsTwoReversals() {
+        var swinger = RAVEArmSwinger()
+        let out = run(&swinger, seconds: 2, sample: jog())
+        let first = out.firstIndex { $0.engaged }
+        #expect(first != nil)
+        // At 1.5 Hz a reversal comes every 1/3 s; the second is at ~0.5 s.
+        #expect(Double(first ?? 0) * frame >= 0.45)
     }
 
     @Test("Stopping the last swinging arm stops the run")

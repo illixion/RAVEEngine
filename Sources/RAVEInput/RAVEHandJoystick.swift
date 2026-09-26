@@ -22,6 +22,7 @@
  same stick without the input package depending on any renderer.
  */
 
+import Foundation
 import simd
 
 /// A validated horizontal basis in a caller-defined tracking coordinate space.
@@ -104,9 +105,10 @@ public struct RAVEJoystickVisualization: Sendable, Equatable {
 public struct RAVEJoystickOutput: Sendable, Equatable {
     /// Head-relative (x = strafe, y = forward), magnitude clamped to 1.
     public var vector: SIMD2<Float>
-    /// Raw tracking-space control-point displacement from the anchor. Vertical
-    /// gestures (jump / duck) read `delta.y`; the horizontal part is already
-    /// folded into `vector`.
+    /// Tracking-space control-point displacement from the anchor (low-passed
+    /// when the joystick's `smoothingTime` is in use). Vertical gestures
+    /// (jump / duck) read `delta.y`; the horizontal part is already folded
+    /// into `vector`.
     public var delta: SIMD3<Float>
     /// True while an anchor is held.
     public var isEngaged: Bool
@@ -136,22 +138,63 @@ public struct RAVEHandJoystick: Sendable {
     /// only thing stopping drift).
     public var deadzoneMeters: Float
 
+    /// Optional per-axis deadzone, as a fraction of full deflection, applied
+    /// after the radial one: a forward push that wanders a little sideways
+    /// then does not strafe. Zero (the default) disables it.
+    public var axialDeadzone: Float
+    /// Time constant, in seconds, of a low-pass filter on the wrist offset.
+    /// Takes effect only through `update(controlPoint:engaged:basis:now:)`,
+    /// which knows the frame time. Zero (the default) disables it, which is
+    /// the original behaviour. ~0.05 s takes the edge off ARKit wrist jitter
+    /// without the stick feeling late.
+    public var smoothingTime: TimeInterval
+
     /// Where the wrist was when the current hold began, in the caller's
     /// tracking space. `nil` when disengaged.
     public private(set) var anchor: SIMD3<Float>?
+    private var smoothedDelta: SIMD3<Float>?
+    private var lastTime: TimeInterval?
 
     /// Compatibility spelling from the original world-space-only API.
     @available(*, deprecated, renamed: "anchor")
     public var anchorWorld: SIMD3<Float>? { anchor }
 
     public init(fullScaleMeters: Float = 0.18, deadzoneMeters: Float = 0.03) {
+        self.init(fullScaleMeters: fullScaleMeters, deadzoneMeters: deadzoneMeters,
+                  axialDeadzone: 0, smoothingTime: 0)
+    }
+
+    public init(
+        fullScaleMeters: Float = 0.18,
+        deadzoneMeters: Float = 0.03,
+        axialDeadzone: Float,
+        smoothingTime: TimeInterval
+    ) {
         self.fullScaleMeters = fullScaleMeters
         self.deadzoneMeters = deadzoneMeters
+        self.axialDeadzone = axialDeadzone
+        self.smoothingTime = smoothingTime
     }
 
     /// Drop the anchor without producing a reading.
     public mutating func release() {
         anchor = nil
+        smoothedDelta = nil
+        lastTime = nil
+    }
+
+    /// Advance one frame with the frame time, which enables `smoothingTime`.
+    /// Otherwise identical to `update(controlPoint:engaged:basis:)`.
+    @discardableResult
+    public mutating func update(
+        controlPoint: SIMD3<Float>?,
+        engaged: Bool,
+        basis: RAVEPlanarBasis,
+        now: TimeInterval
+    ) -> RAVEJoystickOutput {
+        let dt = lastTime.map { max(0, now - $0) }
+        lastTime = now
+        return step(controlPoint: controlPoint, engaged: engaged, basis: basis, dt: dt)
     }
 
     /// Advance one frame.
@@ -168,6 +211,15 @@ public struct RAVEHandJoystick: Sendable {
         engaged: Bool,
         basis: RAVEPlanarBasis
     ) -> RAVEJoystickOutput {
+        step(controlPoint: controlPoint, engaged: engaged, basis: basis, dt: nil)
+    }
+
+    private mutating func step(
+        controlPoint: SIMD3<Float>?,
+        engaged: Bool,
+        basis: RAVEPlanarBasis,
+        dt: TimeInterval?
+    ) -> RAVEJoystickOutput {
         guard engaged,
               let controlPoint,
               controlPoint.x.isFinite,
@@ -175,12 +227,21 @@ public struct RAVEHandJoystick: Sendable {
               controlPoint.z.isFinite
         else {
             anchor = nil
+            smoothedDelta = nil
             return RAVEJoystickOutput()
         }
 
         if anchor == nil { anchor = controlPoint }
         let center = anchor ?? controlPoint
-        let delta = controlPoint - center
+        var delta = controlPoint - center
+        // Low-pass the offset (not the position), so the anchor frame still
+        // reads exactly zero and the filter state starts from rest.
+        if smoothingTime > 0, let dt {
+            let previous = smoothedDelta ?? .zero
+            let alpha = Float(1 - exp(-min(dt, 0.25) / smoothingTime))
+            delta = previous + (delta - previous) * alpha
+        }
+        smoothedDelta = delta
         let strafe = simd_dot(delta, basis.right)
         let advance = simd_dot(delta, basis.forward)
         let planar = SIMD2(strafe, advance)
@@ -194,7 +255,10 @@ public struct RAVEHandJoystick: Sendable {
         if distance > deadzone {
             let activeRange = max(fullScale - deadzone, 1e-4)
             let outputMagnitude = min(1, (distance - deadzone) / activeRange)
-            vector = planar / distance * outputMagnitude
+            let radial = planar / distance * outputMagnitude
+            vector = axialDeadzone > 0
+                ? RAVEStickShaping.axialDeadzone(radial, deadzone: axialDeadzone)
+                : radial
         } else {
             vector = .zero
         }

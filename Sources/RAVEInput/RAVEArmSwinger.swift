@@ -10,9 +10,11 @@
  tracking drops for a few frames mid-stroke must not stop you, and neither may
  a stroke that stalls for an instant at the top of its arc. So:
 
- - it *engages* only when both are present: fists, and a swing pattern (a
-   velocity reversal recently, with real speed behind it). Fists held still do
-   nothing, and open hands waving do nothing;
+ - it *engages* only when both are present: fists, and a swing pattern —
+   `minReversals` stroke reversals within `engageWindow` with real speed
+   behind them, and (by default) the two hands moving in opposite phase, as
+   jogging arms do. Fists held still do nothing, open hands waving do nothing,
+   and neither does a single fist-shake, a two-handed shove, or clapping;
  - it *stays engaged* while either is present, with a short grace period;
  - it *disengages* once both lapse. The swing lapses as soon as the hands slow
    below the walking threshold, so opening your hands and stopping frees the
@@ -75,6 +77,29 @@ public struct RAVEArmSwingTuning: Sendable, Equatable {
     /// How long a pointing pose must hold before its hand leaves the swing.
     /// Long enough to reject a tracking flicker, short enough to feel instant.
     public var pointHold: TimeInterval
+    /// How many stroke reversals (on either hand) must have happened within
+    /// `engageWindow` before the swing may engage. One reversal is a single
+    /// back-and-forth flick, which a gesture made for any other reason
+    /// produces constantly; two is the start of a rhythm.
+    public var minReversals: Int
+    /// How far back `minReversals` are counted. Longer than two strokes of a
+    /// slow jog.
+    public var engageWindow: TimeInterval
+    /// Require the two hands to move in opposite phase — one forward while the
+    /// other goes back — to engage. Jogging arms do; a two-handed push, a pull
+    /// or a clap do not. Needs both hands tracked to engage (either may drop
+    /// out afterwards). False restores the one-hand-can-engage rule.
+    public var requireOppositePhase: Bool
+    /// How anti-phase the hands must read to engage, 0…1: the smoothed
+    /// agreement of the two hands' stroke directions must be at or below
+    /// `-antiPhaseThreshold` (−1 is perfectly opposite).
+    public var antiPhaseThreshold: Float
+    /// Time constant of the phase-agreement average.
+    public var phaseSmoothing: TimeInterval
+    /// Let a single swinging arm's upward flick jump. Off by default: with one
+    /// hand there is no partner to tell a jump flick from a big stroke or a
+    /// reach, so it misfires.
+    public var oneArmJump: Bool
     /// How long a hand that left must be a swinging fist before it rejoins.
     public var rejoinHold: TimeInterval
     /// How far back the velocity estimate reaches.
@@ -115,13 +140,19 @@ public struct RAVEArmSwingTuning: Sendable, Equatable {
         fistCurlThreshold: Float = 0.06,
         fistCurledFingerCount: Int = 3,
         pointExtension: Float = 0.08,
-        pointHold: TimeInterval = 0.08,
+        pointHold: TimeInterval = 0.12,
+        minReversals: Int = 2,
+        engageWindow: TimeInterval = 1.2,
+        requireOppositePhase: Bool = true,
+        antiPhaseThreshold: Float = 0.5,
+        phaseSmoothing: TimeInterval = 0.3,
+        oneArmJump: Bool = false,
         rejoinHold: TimeInterval = 0.3,
         velocityWindow: TimeInterval = 0.05,
         patternWindow: TimeInterval = 0.8,
-        patternSpeed: Float = 0.4,
+        patternSpeed: Float = 0.5,
         fastWindow: TimeInterval = 0.25,
-        reversalSpeed: Float = 0.15,
+        reversalSpeed: Float = 0.2,
         grace: TimeInterval = 0.25,
         walkSpeed: Float = 0.4,
         runSpeed: Float = 2.0,
@@ -136,6 +167,12 @@ public struct RAVEArmSwingTuning: Sendable, Equatable {
         self.fistCurledFingerCount = fistCurledFingerCount
         self.pointExtension = pointExtension
         self.pointHold = pointHold
+        self.minReversals = minReversals
+        self.engageWindow = engageWindow
+        self.requireOppositePhase = requireOppositePhase
+        self.antiPhaseThreshold = antiPhaseThreshold
+        self.phaseSmoothing = phaseSmoothing
+        self.oneArmJump = oneArmJump
         self.rejoinHold = rejoinHold
         self.velocityWindow = velocityWindow
         self.patternWindow = patternWindow
@@ -163,6 +200,19 @@ public struct RAVEArmSwingTuning: Sendable, Equatable {
         t.patternSpeed /= s
         return t
     }
+
+    /// The original, easier-to-engage thresholds: one reversal engages, no
+    /// phase check, one-arm jump on, 80 ms point hold, 0.4 m/s pattern speed,
+    /// 0.15 m/s reversal speed. For comparison, or an app that wants them.
+    public static let legacy = RAVEArmSwingTuning(
+        pointHold: 0.08,
+        minReversals: 1,
+        engageWindow: 0.8,
+        requireOppositePhase: false,
+        oneArmJump: true,
+        patternSpeed: 0.4,
+        reversalSpeed: 0.15
+    )
 }
 
 /// What keeps the swinger engaged this frame. For on-device diagnostics.
@@ -192,7 +242,7 @@ public struct RAVEArmSwingOutput: Sendable, Equatable {
     /// decaying between them.
     public var handSpeed: Float
     /// Set on the frame the swinging hands flicked upward together (the one
-    /// hand, when only one is swinging).
+    /// hand, when only one is swinging and the tuning allows `oneArmJump`).
     public var jumpBegan: Bool
     public var support: RAVEArmSwingSupport
 
@@ -235,6 +285,10 @@ public struct RAVEArmSwinger: Sendable {
         /// Sign of the along-stroke velocity last time it was clearly moving.
         var strokeSign: Float = 0
         var lastReversal: TimeInterval = -.infinity
+        /// The last few reversal times, newest in lane 0, for counting them.
+        var reversals = SIMD4<Double>(repeating: -.infinity)
+        /// Signed along-stroke speed this frame (0 when below reversalSpeed).
+        var along: Float = 0
         var lastFast: TimeInterval = -.infinity
         var lastUpFlick: TimeInterval = -.infinity
         /// Participation, which outlives a tracking gap (the grace covers it),
@@ -256,8 +310,21 @@ public struct RAVEArmSwinger: Sendable {
             velocity = .zero
             strokeSign = 0
             lastReversal = -.infinity
+            reversals = SIMD4(repeating: -.infinity)
+            along = 0
             lastFast = -.infinity
             lastUpFlick = -.infinity
+        }
+
+        mutating func noteReversal(at time: TimeInterval) {
+            lastReversal = time
+            reversals = SIMD4(time, reversals[0], reversals[1], reversals[2])
+        }
+
+        func reversalCount(within window: TimeInterval, now: TimeInterval) -> Int {
+            var n = 0
+            for i in 0..<4 where now - reversals[i] <= window { n += 1 }
+            return n
         }
 
         mutating func push(_ point: SIMD3<Float>, at time: TimeInterval, window: TimeInterval) {
@@ -294,6 +361,13 @@ public struct RAVEArmSwinger: Sendable {
     private var lastUpdate: TimeInterval?
     private var lastJump: TimeInterval = -.infinity
     private var heading = SIMD2<Float>(0, 1)
+    /// Smoothed agreement of the two hands' stroke directions: +1 in phase,
+    /// −1 opposite, 0 unknown.
+    private var phase: Float = 0
+
+    /// The smoothed phase agreement, −1 (opposite, jogging) … +1 (together).
+    /// For diagnostics.
+    public var phaseAgreement: Float { phase }
 
     public init(tuning: RAVEArmSwingTuning = RAVEArmSwingTuning(),
                 direction: RAVEArmSwingDirection = .head) {
@@ -315,6 +389,7 @@ public struct RAVEArmSwinger: Sendable {
         envelope = 0
         lastUpdate = nil
         heading = SIMD2(0, 1)
+        phase = 0
     }
 
     /// Advance one frame.
@@ -355,8 +430,11 @@ public struct RAVEArmSwinger: Sendable {
             let along = simd_dot(v, basis.forward) + v.y
             if abs(along) >= t.reversalSpeed {
                 let sign: Float = along > 0 ? 1 : -1
-                if track.strokeSign != 0, sign != track.strokeSign { track.lastReversal = now }
+                if track.strokeSign != 0, sign != track.strokeSign { track.noteReversal(at: now) }
                 track.strokeSign = sign
+                track.along = along
+            } else {
+                track.along = 0
             }
             if v.y >= t.jumpSpeed { track.lastUpFlick = now }
             let indexCurled = sample.index.extension_ < t.fistCurlThreshold
@@ -377,6 +455,18 @@ public struct RAVEArmSwinger: Sendable {
         let r = observe(rightSample, &right)
         let trackedCount = (l == nil ? 0 : 1) + (r == nil ? 0 : 1)
 
+        // Phase agreement, only while both hands are clearly moving; it drifts
+        // back to "unknown" while either is out of view.
+        if dt > 0 {
+            let k = 1 - expf(-dt / Float(max(t.phaseSmoothing, 1e-3)))
+            if l != nil, r != nil, left.along != 0, right.along != 0 {
+                let agreement: Float = (left.along > 0) == (right.along > 0) ? 1 : -1
+                phase += (agreement - phase) * k
+            } else if l == nil || r == nil {
+                phase += (0 - phase) * k
+            }
+        }
+
         // Engage: every tracked hand a swinging-ready fist, and at least one
         // tracked. An untracked hand does not veto (jogging arms swing in and
         // out of the cameras). Both hands join, the unseen one on credit: the
@@ -384,7 +474,12 @@ public struct RAVEArmSwinger: Sendable {
         if !engaged {
             let allFists = trackedCount > 0 && (l?.fist ?? true) && (r?.fist ?? true)
             let pattern = (l?.pattern ?? false) || (r?.pattern ?? false)
-            if allFists && pattern {
+            let rhythm = max(left.reversalCount(within: t.engageWindow, now: now),
+                             right.reversalCount(within: t.engageWindow, now: now))
+                >= max(t.minReversals, 1)
+            let phased = !t.requireOppositePhase
+                || (trackedCount == 2 && phase <= -t.antiPhaseThreshold)
+            if allFists && pattern && rhythm && phased {
                 engaged = true
                 func join(_ track: inout Track) {
                     track.leave()
@@ -490,17 +585,17 @@ public struct RAVEArmSwinger: Sendable {
 
         // Jump: the swinging hands flick up together. A jogging stroke is
         // anti-phase, so both hands rising fast at once is the flick and not
-        // the gait. One hand swinging alone has no partner to check against,
-        // so its own flick counts; the flick speed sits well above a stroke's
-        // vertical speed.
+        // the gait. One hand swinging alone has no partner to check against;
+        // its own flick counts only with `oneArmJump`, since without a partner
+        // a big stroke or a reach can read as one.
         var jumpBegan = false
         let flicked: Bool
         switch (left.swinging, right.swinging) {
         case (true, true):
             flicked = abs(left.lastUpFlick - right.lastUpFlick) <= t.jumpPairWindow
                 && now - max(left.lastUpFlick, right.lastUpFlick) <= t.jumpPairWindow
-        case (true, false): flicked = now - left.lastUpFlick <= t.jumpPairWindow
-        case (false, true): flicked = now - right.lastUpFlick <= t.jumpPairWindow
+        case (true, false): flicked = t.oneArmJump && now - left.lastUpFlick <= t.jumpPairWindow
+        case (false, true): flicked = t.oneArmJump && now - right.lastUpFlick <= t.jumpPairWindow
         case (false, false): flicked = false
         }
         if engaged, flicked, now - lastJump >= t.jumpCooldown {

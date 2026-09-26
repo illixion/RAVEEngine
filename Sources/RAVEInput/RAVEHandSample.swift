@@ -112,3 +112,61 @@ public struct RAVEHandSample: Sendable, Equatable {
         return count
     }
 }
+
+// MARK: - Size-normalised metrics
+
+/// Pose metrics divided by the hand's own palm length, so one threshold works
+/// for a child's hand and an adult's. LambdaVision computes these locally for
+/// its finger-gun trigger, thumb-curl reload and 🤌 weapon wheel; they live here
+/// so the next consumer does not derive them a fourth time.
+public extension RAVEHandSample {
+    /// Wrist to middle-finger knuckle, meters. The normaliser for every ratio
+    /// below.
+    var palmLength: Float { simd_distance(wrist, middle.knuckle) }
+
+    /// Below this palm length the ratios are meaningless (joints coincident);
+    /// they then report 1, "extended", which is the safe reading for a trigger.
+    static let minimumPalmLength: Float = 1e-4
+
+    private func normalised(_ distance: Float) -> Float {
+        let palm = palmLength
+        return palm > Self.minimumPalmLength ? distance / palm : 1
+    }
+
+    /// Fingertip to its proximal knuckle, over palm length. Extended ≈ 1; a
+    /// curled finger drops toward ~0.3. The knuckle barely moves as the finger
+    /// curls, so this is safe to read on an aiming hand. Lambda's `indexExt`.
+    func extensionRatio(_ finger: RAVEHandFinger) -> Float {
+        normalised(simd_distance(self[finger].tip, self[finger].knuckle))
+    }
+
+    /// `extensionRatio(.index)` — the finger-gun trigger metric.
+    var indexExtensionRatio: Float { extensionRatio(.index) }
+
+    /// Thumb tip to the index knuckle, over palm length. A raised thumb reads
+    /// ~0.5+; curled down onto the fist it approaches ~0.3. Lambda's `thumbExt`
+    /// (the reload gesture).
+    var thumbExtensionRatio: Float {
+        normalised(simd_distance(thumbTip, index.knuckle))
+    }
+
+    /// Fingertip to its hand-base metacarpal, over palm length. Low = curled.
+    /// The size-normalised form of the fist test (`extension_` in meters).
+    func curlRatio(_ finger: RAVEHandFinger) -> Float {
+        normalised(self[finger].extension_)
+    }
+
+    /// The farthest of the four fingertips from the thumb tip, meters. All tips
+    /// gathered at the thumb (🤌) reads low, ~2–4 cm. Not normalised, matching
+    /// the thresholds Lambda tuned; see `fingertipSpreadRatio`.
+    var fingertipSpreadToThumb: Float {
+        var spread: Float = 0
+        for finger in RAVEHandFinger.allCases {
+            spread = max(spread, simd_distance(self[finger].tip, thumbTip))
+        }
+        return spread
+    }
+
+    /// `fingertipSpreadToThumb` over palm length.
+    var fingertipSpreadRatio: Float { normalised(fingertipSpreadToThumb) }
+}

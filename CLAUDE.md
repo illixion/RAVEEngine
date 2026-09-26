@@ -93,7 +93,8 @@ Two of the three input consumers and two of the four diagnostics consumers poll 
 loop. The other consumers drive the same code from `@MainActor`. So:
 
 - `RAVEPinchDetector`, `RAVEHandJoystick`, `RAVEArmSwinger`, `RAVEPalmGeometry`, `RAVEEdgeTracker`,
-  `RAVESampleSeries` are **isolation-free value types**
+  `RAVEGestureGate`, `RAVEPalmFacingGate`, `RAVEHandOwnership`, `RAVESystemPinchGate`,
+  `RAVEStickShaping`/`RAVESnapTurnDetector`, `RAVESampleSeries` are **isolation-free value types**
 - `RAVEMetricCollector` is a **lock-guarded class**, `@unchecked Sendable` — an actor would
   make `record()` async and unusable from exactly the callers that need it most
 - `RAVEARKitHandSensor` and the SwiftUI views are the `@MainActor` conveniences *on top*
@@ -147,6 +148,36 @@ pointing pose (index out, ring and little curled, middle either way: a one- or t
 index curled, since a finger gun has three curled fingers too. `leftSwinging`/`rightSwinging`
 tell the consumer which hands are free. LambdaVision
 is the only consumer so far.
+
+**Accidental input is the failure mode to design against.** Every filter below
+exists because a gesture fired when nobody meant it, and every app had grown its own
+guard for the same case. `RAVEPinchTuning` carries a **selection margin** (the nearest
+finger engages only when the runner-up is ≥ 1 cm farther — nearest-wins read Oneiros's
+thumb+index as thumb+middle), **finger-switch hysteresis** (another finger must beat the
+held one by the margin for `fingerSwitchHold` before the pinch re-targets; the original
+dropped it the moment a neighbour crossed the engage radius, emitting end+begin on
+jitter), a **tracking-loss grace** (`update(sample: nil)` holds state 120 ms; deliberate
+suppression is `forceRelease()`, which is immediate — `RAVEARKitHandSensor` uses it for
+`suppressedHands`), and an optional **closing-speed** floor (off by default). `.legacy`
+reproduces the original filter-light behaviour. `.clutch` keeps its instant engage —
+Lambda's locomotion relies on it — and `.joystick` (index only, 150 ms) is the preset a
+joystick hand should adopt. `RAVEArmSwinger` engages only on ≥ 2 reversals *and* the two
+hands moving in opposite phase (a jog, not a shove or a clap), and its one-arm jump is
+opt-in (`RAVEArmSwingTuning.legacy` restores the old rules). The engage/release logic every
+app hand-built — menu holds, the reload charge, palm-up panels — is `RAVEGestureGate`
+(hysteresis, hold-to-engage with a 0…1 `progress`, release grace, re-arm delay, caller-
+evaluated conditions); `RAVEPalmFacingGate` presets it for panels (`.panel` = Longwave's
+plain 0.95/0.70, `.forgiving` = Oneiros's pitch-invariant 0.88/0.70 + 0.4 s linger, both
+with a new 0.12 s dwell). `RAVEHandOwnership` is the per-hand claim/priority/holdoff arbiter
+(Lambda's `gunHandBusy`, Longwave's `suppressedHands`, as one rule), and
+`RAVESystemPinchGate` is Oneiros's system-pinch-owns-thumb+index gate, generic over the
+app's surface enum. **All of these thresholds are unverified on device** until the user
+says otherwise — the simulator has no hand tracking.
+
+`RAVEARKitHandSensor` reserves left + index for the joystick unless `joystickEnabled` is
+false; `joystickPinchTuning` gives the joystick its own detector. The joystick's pinch is
+kept out of `RAVEHandTickOutput.pinchEvents` but is still reported *held* in `left`/`right`,
+because Longwave maps any held left pinch to its wire-level `leftPinch` flag.
 
 The shared default deadzone is 3 cm. Zero made normal ARKit wrist jitter into movement in
 the two consumers that did not override it; Lambda's long-standing 3 cm setting was the

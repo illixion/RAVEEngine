@@ -70,10 +70,31 @@ plane, in both hands, in any pose, regardless of how the tracking framework
 numbers its axes. An earlier wrist-frame −Y rule worked only because it was
 applied to one hand.
 
+### Hard to trigger by accident
+
+Gestures misfiring is the dominant failure, so the shared layer filters for it
+rather than leaving every app to:
+
+| Type | What it guards |
+|---|---|
+| `RAVEPinchTuning` | 1 cm selection margin (ambiguous hands pinch nothing), finger-switch hysteresis, 120 ms tracking-loss grace, optional closing-speed floor. Presets: `.standard` (buttons), `.clutch` (instant, Lambda's locomotion), `.joystick` (index, 150 ms), `.legacy` (the original rules) |
+| `RAVEArmSwinger` | engages on ≥ 2 stroke reversals with the hands in opposite phase; one-arm jump opt-in; `RAVEArmSwingTuning.legacy` for the old rules |
+| `RAVEGestureGate` | generic engage/release: hysteresis, hold-to-engage with 0…1 progress, release grace, re-arm delay, conditions — menu holds, charge rings, reloads |
+| `RAVEPalmFacingGate` | palm-toward-face panels: `.panel` (plain metric) and `.forgiving` (pitch-invariant + linger), both with a short dwell |
+| `RAVEHandOwnership` | per-hand claims with priority and a post-release holdoff, so one hand means one thing |
+| `RAVESystemPinchGate` | the system gesture owns thumb+index; hand-tracker world actions wait it out |
+| `RAVEStickShaping`, `RAVESnapTurnDetector` | radial/axial deadzones with rescale; snap turns with hysteresis and optional repeat |
+| `RAVEEdgeTracker(debounce:)` | debounced press/release edges |
+
+`RAVEHandJoystick` gained optional wrist-offset smoothing and an axial deadzone (both off
+by default), and `RAVEHandSample` size-normalised metrics (`palmLength`,
+`indexExtensionRatio`, `thumbExtensionRatio`, `curlRatio`, `fingertipSpreadToThumb`).
+The thresholds are unverified on device.
+
 ### No isolation in the sensing layer
 
-`RAVEPinchDetector`, `RAVEHandJoystick`, `RAVEPalmGeometry` and `RAVEEdgeTracker`
-are isolation-free value types. That is what lets a `@MainActor` tracker and a
+`RAVEPinchDetector`, `RAVEHandJoystick`, `RAVEPalmGeometry`, `RAVEEdgeTracker` and the
+gates above are isolation-free value types. That is what lets a `@MainActor` tracker and a
 render-thread poll loop share them without either converting — a hard
 requirement, since two of the three consumers run off the main actor.
 
