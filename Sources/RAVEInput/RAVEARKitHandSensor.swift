@@ -256,10 +256,13 @@ public final class RAVEARKitHandSensor: RAVEHandInputProvider {
         let driving = dedicated ?? (joystickChirality == .left ? left : right)
         let engaged = driving.held == joystickFinger
         let wrist = (joystickChirality == .left ? leftSample : rightSample)?.wrist
+        // Pass the frame time: without it `smoothingTime` on a joystick set
+        // through this sensor silently does nothing.
         let stick = joystick.update(
             controlPoint: wrist,
             engaged: engaged,
-            basis: trackingBasis
+            basis: trackingBasis,
+            now: now
         )
 
         return RAVEHandTickOutput(
