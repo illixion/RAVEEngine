@@ -212,10 +212,17 @@ is A/X/Cross/Square) with capacitive touch bits gated by `touchValid`, battery. 
   `AccessoryTrackingProvider`, chirality from `heldChirality ?? inherentChirality`, CoreHaptics
   per side. **Never run on hardware.** Longwave still carries its own copy until it adopts this.
 - **`RAVEQuestBridgeSource`** — a Quest on the desk running the Controller Bridge app streams
-  Touch controllers over UDP :9520. Opt-in: nothing listens until `start()`. Answers probes,
-  sends the status heartbeat the Quest app's "connected" pulse waits for, sends haptics to
-  sender:9521, optionally advertises `_controllerbridge._udp`. Apps need
-  `NSLocalNetworkUsageDescription` (and `NSBonjourServices` when advertising).
+  Touch controllers over UDP :9520. Opt-in: nothing listens until `start()`. Once started it
+  advertises `_controllerbridge._udp` (default on, `advertise = false` opts out) and answers
+  every probe — at protocol v3 with its kind, name and whether it is accepting — so the Quest
+  app connects with no typed address; sends the status heartbeat the Quest app's "connected"
+  pulse waits for and haptics to sender:9521. **Apps need `NSLocalNetworkUsageDescription`
+  and `NSBonjourServices` = `_controllerbridge._udp`** — without the first the listener hears
+  nothing, without the second the advertisement fails. It never hears the Quest's
+  *broadcast* probes, by design: visionOS needs Apple's managed multicast entitlement to
+  receive broadcasts, and Network.framework does not do broadcast at all (TN3151; measured on
+  macOS too). The Quest therefore also probes unicast (Bonjour results + a small-subnet
+  sweep), which needs no entitlement. See the source's header before "fixing" this.
 
 The Quest poses are in the Quest's own stage space, so the source aligns them itself against
 ARKit hands the app feeds in (`observeHands`, a `RAVEHandSample` per side — it never opens an

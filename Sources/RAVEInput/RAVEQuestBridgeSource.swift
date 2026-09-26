@@ -11,6 +11,10 @@
  What this class owns, so an app does not have to:
 
    - the socket (Network.framework, opt-in: nothing listens until `start()`),
+   - discovery: once started it advertises `_controllerbridge._udp` over
+     Bonjour (on by default, `Configuration.advertise` opts out) and answers
+     every probe with its name, kind and whether it is accepting, so the Quest
+     app finds and connects to it with no typed address,
    - the protocol: probe replies (the Quest's "Test connection" button works
      against this app), the periodic status heartbeat (the Quest app's
      "connected" pulse fires on the first one — a host that never sends it
@@ -29,11 +33,39 @@
  safe from any thread, including a render thread; network callbacks run on a
  private serial queue.
 
- Info.plist, in the consuming app:
-   - `NSLocalNetworkUsageDescription` — receiving from a LAN peer triggers the
-     local-network prompt; without the key the listener silently gets nothing.
-   - `NSBonjourServices` = [`_controllerbridge._udp`] — only when
-     `Configuration.advertise` is on; publishing an unlisted service fails.
+ ┌──────────────────────────────────────────────────────────────────────────┐
+ │ Info.plist — REQUIRED in every consuming app, or discovery silently fails │
+ │                                                                          │
+ │   NSLocalNetworkUsageDescription  (String)                               │
+ │       e.g. "Receives your Quest controllers over the local network."    │
+ │       Receiving from a LAN peer triggers the local-network prompt;       │
+ │       without the key the listener silently gets nothing.                │
+ │   NSBonjourServices  (Array)                                             │
+ │       [ "_controllerbridge._udp" ]                                       │
+ │       Advertising is on by default; publishing an unlisted service type  │
+ │       fails (the listener still works, the Quest just has to find it by  │
+ │       probe instead). Set `Configuration.advertise = false` to drop it.  │
+ └──────────────────────────────────────────────────────────────────────────┘
+
+ Discovery, broadcasts and the multicast entitlement: the Quest finds hosts
+ two ways — Bonjour, and 0xF0 probes sent to its subnet's broadcast address,
+ to 255.255.255.255, and UNICAST to every address of a small subnet plus every
+ host Bonjour resolved. This source deliberately never hears the broadcasts,
+ for two independent reasons:
+   - on visionOS (and iOS) receiving a UDP broadcast needs the managed
+     `com.apple.developer.networking.multicast` entitlement (TN3179:
+     "Receiving an incoming UDP broadcast — yes"; macOS needs none), which
+     Apple grants per app on request and a package cannot assume;
+   - Network.framework does not support UDP broadcast at all (TN3151: "it
+     does not support UDP broadcast … use BSD Sockets"). Measured on macOS
+     2026-09-26: this listener, dual-stack or forced to IPv4, never saw a
+     subnet-broadcast probe that a plain IPv4 BSD socket received.
+ So it is found by Bonjour plus the Quest's unicast probes — receiving
+ unicast needs no entitlement — and replies unicast to whichever probe
+ arrives. Broadcast discovery is for the SteamVR driver (BSD sockets, no
+ entitlement on Windows/macOS/Linux) and for networks where mDNS is blocked;
+ there the Quest's unicast subnet sweep still reaches this source. Adding a
+ BSD broadcast socket here would buy nothing without the entitlement.
  */
 
 import Foundation
@@ -64,11 +96,19 @@ public final class RAVEQuestBridgeSource: RAVETrackedControllerSource, @unchecke
     public struct Configuration: Sendable {
         /// UDP port to listen on; the Quest app's "Driver port".
         public var port: UInt16 = RAVEQuestBridgeProtocol.defaultPort
-        /// Advertise `_controllerbridge._udp` so the Quest app can find this
-        /// device without a typed address. Needs `NSBonjourServices`.
-        public var advertise = false
-        /// Bonjour instance name; nil lets the system use the device name.
+        /// Advertise `_controllerbridge._udp` while started, so the Quest app
+        /// finds this device with no typed address. On by default; needs
+        /// `NSBonjourServices` (see the file header). Probes are answered
+        /// regardless of this setting.
+        public var advertise = true
+        /// The name the Quest app shows and remembers this host by: the
+        /// Bonjour instance name and the name in probe replies. nil lets the
+        /// system pick the Bonjour name (the device name), and probe replies
+        /// then use that registered name — or the app's display name when not
+        /// advertising or before registration completes.
         public var serviceName: String?
+        /// What probe replies say this host is.
+        public var hostKind: RAVEQuestBridgeProtocol.HostKind = .visionOSApp
         /// UserDefaults key for the solved transform; nil disables persistence.
         public var persistenceKey: String? = "RAVEQuestBridge.calibration.v1"
         /// UserDefaults suite; nil for `.standard`.
@@ -128,6 +168,8 @@ public final class RAVEQuestBridgeSource: RAVETrackedControllerSource, @unchecke
         public var senderVersion: UInt8 = 0
         public var sender: RAVEQuestBridgeProtocol.Sender = .unknown
         public var senderAddress: String?
+        /// The name the Quest app sees for this host (nil when not listening).
+        public var advertisedName: String?
         public var packetsReceived: UInt32 = 0
         /// Seconds since the last controller packet, nil before the first.
         public var inputAge: Double?
@@ -147,6 +189,10 @@ public final class RAVEQuestBridgeSource: RAVETrackedControllerSource, @unchecke
     private var inbound: [ObjectIdentifier: (connection: NWConnection, lastActive: Double)] = [:]
     private var returnConnection: NWConnection?
     private var returnHost: NWEndpoint.Host?
+    /// Address of the latest controller packet's sender, as `process` saw it.
+    private var streamingFrom: String?
+    /// The Bonjour instance name the system registered, once it has.
+    private var registeredName: String?
 
     private var latest: RAVEQuestBridgeProtocol.ControllerState?
     private var latestAt: Double = 0
@@ -198,6 +244,24 @@ public final class RAVEQuestBridgeSource: RAVETrackedControllerSource, @unchecke
                 name: configuration.serviceName, type: RAVEQuestBridgeProtocol.bonjourServiceType,
                 domain: nil, txtRecord: NWTXTRecord(["v": String(RAVEQuestBridgeProtocol.version)]))
         }
+        listener.serviceRegistrationUpdateHandler = { [weak self] change in
+            guard let self else { return }
+            switch change {
+            case .add(let endpoint):
+                if case let .service(name, _, _, _) = endpoint {
+                    self.lock.lock()
+                    self.registeredName = name
+                    self.lock.unlock()
+                    self.log?("quest bridge: advertising as \"\(name)\"")
+                }
+            case .remove:
+                self.lock.lock()
+                self.registeredName = nil
+                self.lock.unlock()
+            @unknown default:
+                break
+            }
+        }
         listener.newConnectionHandler = { [weak self] connection in self?.accept(connection) }
         listener.stateUpdateHandler = { [weak self] state in
             switch state {
@@ -221,6 +285,8 @@ public final class RAVEQuestBridgeSource: RAVETrackedControllerSource, @unchecke
         inbound.removeAll()
         returnConnection = nil
         returnHost = nil
+        registeredName = nil
+        streamingFrom = nil
         latest = nil
         lastHeartbeatAt = nil
         lastHandsAt = nil
@@ -352,6 +418,7 @@ public final class RAVEQuestBridgeSource: RAVETrackedControllerSource, @unchecke
         s.rightHold = alignment.verdict(.right)
         s.packetsReceived = packetsReceived
         s.senderAddress = returnHost.map { "\($0)" }
+        s.advertisedName = s.isListening ? hostName() : nil
         s.batteryLeft = heldBattery.left
         s.batteryRight = heldBattery.right
         guard s.isListening, let state = latest else { return s }
@@ -440,12 +507,22 @@ public final class RAVEQuestBridgeSource: RAVETrackedControllerSource, @unchecke
         var out = Outgoing()
         switch RAVEQuestBridgeProtocol.decode(datagram) {
         case .probe(let probe):
+            // Answered always, streaming or not, and never taken as a sender:
+            // discovery probes arrive from any Quest on the LAN.
+            let version = RAVEQuestBridgeProtocol.negotiatedVersion(peer: probe.protocolVersion)
             lock.lock()
             let count = packetsReceived
+            var info: RAVEQuestBridgeProtocol.HostInfo?
+            if version >= RAVEQuestBridgeProtocol.hostInfoVersion {
+                info = RAVEQuestBridgeProtocol.HostInfo(
+                    kind: configuration.hostKind,
+                    accepting: isAccepting(prober: senderHost, now: now),
+                    name: hostName())
+            }
             lock.unlock()
             out.reply = RAVEQuestBridgeProtocol.Status(
-                protocolVersion: RAVEQuestBridgeProtocol.negotiatedVersion(peer: probe.protocolVersion),
-                nonce: probe.nonce, packetsReceived: count).encoded()
+                protocolVersion: version, nonce: probe.nonce, packetsReceived: count,
+                hostInfo: info).encoded()
 
         case .controllerState(let state):
             onController()
@@ -453,6 +530,7 @@ public final class RAVEQuestBridgeSource: RAVETrackedControllerSource, @unchecke
             let first = latest == nil
             latest = state
             latestAt = now
+            streamingFrom = senderHost
             packetsReceived &+= 1
             if state.flags.contains(.battery) {
                 heldBattery = (state.battery(.left), state.battery(.right), true)
@@ -476,6 +554,28 @@ public final class RAVEQuestBridgeSource: RAVETrackedControllerSource, @unchecke
         }
         return out
     }
+
+    /// Caller holds `lock`. Accepting unless another sender is streaming:
+    /// a live stream (packets within `lostAfter`) from a different address
+    /// makes this host busy for every prober but that sender.
+    private func isAccepting(prober: String?, now: Double) -> Bool {
+        guard latest != nil, now - latestAt <= configuration.lostAfter,
+              let current = streamingFrom else { return true }
+        return prober == current
+    }
+
+    /// Caller holds `lock`.
+    private func hostName() -> String {
+        if let name = configuration.serviceName, !name.isEmpty { return name }
+        if let registeredName, !registeredName.isEmpty { return registeredName }
+        return Self.appDisplayName
+    }
+
+    static let appDisplayName: String = {
+        let info = Bundle.main.infoDictionary ?? [:]
+        let name = (info["CFBundleDisplayName"] as? String) ?? (info["CFBundleName"] as? String)
+        return name.flatMap { $0.isEmpty ? nil : $0 } ?? ProcessInfo.processInfo.processName
+    }()
 
     /// Caller holds `lock`.
     private func retarget(to host: NWEndpoint.Host) {

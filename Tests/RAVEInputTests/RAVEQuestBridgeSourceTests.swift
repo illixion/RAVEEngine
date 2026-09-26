@@ -162,6 +162,46 @@ struct RAVEQuestBridgeSourceTests {
                                 senderHost: "q", now: 1)
         let reply2 = try #require(v2.reply)
         #expect(RAVEQuestBridgeProtocol.Status(reply2)?.protocolVersion == 2)
+        #expect(reply2.count == 16)                               // a v2 app gets no trailer
+        #expect(reply1Bytes.count == 16)
+    }
+
+    @Test("v3 probes get kind, name and accepting; busy while another sender streams")
+    func discoveryReply() throws {
+        let clock = FakeClock()
+        let source = makeSource(clock) { $0.serviceName = "Desk AVP" }
+        func probe(from host: String, at now: Double) throws -> RAVEQuestBridgeProtocol.HostInfo {
+            let out = source.process(datagram: RAVEQuestBridgeProtocol.Probe(protocolVersion: 3, nonce: 9).encoded(),
+                                     senderHost: host, now: now)
+            #expect(out.heartbeat == nil)
+            let bytes = try #require(out.reply)
+            #expect(bytes.count == 64)
+            let status = try #require(RAVEQuestBridgeProtocol.Status(bytes))
+            #expect(status.protocolVersion == 3 && status.nonce == 9)
+            return try #require(status.hostInfo)
+        }
+        let idle = try probe(from: "10.0.0.2", at: 1)
+        #expect(idle.hostKind == .visionOSApp && idle.name == "Desk AVP" && idle.isAccepting)
+
+        // 10.0.0.2 starts streaming: still accepting for it, busy for anyone else.
+        _ = source.process(datagram: packet(version: 3, left: .zero, right: .zero), senderHost: "10.0.0.2", now: 2)
+        #expect(try probe(from: "10.0.0.2", at: 2.1).isAccepting)
+        #expect(try !probe(from: "10.0.0.3", at: 2.1).isAccepting)
+        // A probe is never a sender: the stream still belongs to 10.0.0.2.
+        #expect(try !probe(from: "10.0.0.3", at: 2.2).isAccepting)
+        // The stream goes quiet past lostAfter: accepting again for everyone.
+        #expect(try probe(from: "10.0.0.3", at: 2 + source.configuration.lostAfter + 0.01).isAccepting)
+    }
+
+    @Test("Advertising is on by default; the probe name falls back to the app name")
+    func discoveryDefaults() throws {
+        let source = makeSource(FakeClock())
+        #expect(source.configuration.advertise)
+        let out = source.process(datagram: RAVEQuestBridgeProtocol.Probe(protocolVersion: 3, nonce: 1).encoded(),
+                                 senderHost: "q", now: 1)
+        let reply = try #require(out.reply)
+        let info = try #require(RAVEQuestBridgeProtocol.Status(reply)?.hostInfo)
+        #expect(info.name == RAVEQuestBridgeSource.appDisplayName && !info.name.isEmpty)
     }
 
     @Test("Heartbeat on the first packet, then every interval, at the sender's version")
@@ -301,8 +341,56 @@ struct RAVEQuestBridgeSourceTests {
         let status = source.status
         #expect(status.packetsReceived >= 20)
         #expect(status.phase == .seen)
-        #expect(status.senderVersion == 2)
+        #expect(status.senderVersion >= 2)
         #expect(status.sender == (external ? .testTool : .questApp))
         #expect(status.batteryLeft != nil)
+    }
+
+    /// Live discovery reply over a real socket. Opt-in like `liveLoopback`
+    /// (it binds a port): `RAVE_QUEST_LOOPBACK=1 swift test --filter
+    /// liveDiscovery` probes over loopback itself. With `RAVE_QUEST_LIVE=1` it
+    /// also stays up 10 s for `tools/test_sender.py --discover --port 19522`
+    /// from the Controller Bridge repository — which on macOS also exercises
+    /// the broadcast path (macOS needs no multicast entitlement).
+    @Test("Live discovery reply over UDP", .enabled(if: ProcessInfo.processInfo.environment["RAVE_QUEST_LOOPBACK"] == "1"
+                                                    || ProcessInfo.processInfo.environment["RAVE_QUEST_LIVE"] == "1"))
+    func liveDiscovery() async throws {
+        var config = RAVEQuestBridgeSource.Configuration()
+        config.port = 19522
+        config.persistenceKey = nil
+        config.serviceName = "RAVE loopback host"
+        let source = RAVEQuestBridgeSource(configuration: config)
+        try source.start()
+        defer { source.stop() }
+        try await Task.sleep(for: .milliseconds(300))
+
+        let fd = socket(AF_INET, SOCK_DGRAM, 0)
+        defer { close(fd) }
+        var timeout = timeval(tv_sec: 2, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = UInt16(19522).bigEndian
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let probe = RAVEQuestBridgeProtocol.Probe(protocolVersion: 3, nonce: 0xC0FFEE).encoded()
+        _ = probe.withUnsafeBytes { raw in
+            withUnsafePointer(to: &addr) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    sendto(fd, raw.baseAddress, raw.count, 0, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
+            }
+        }
+        var buffer = [UInt8](repeating: 0, count: 256)
+        let n = buffer.withUnsafeMutableBytes { recv(fd, $0.baseAddress, $0.count, 0) }
+        #expect(n == 64)
+        let status = try #require(RAVEQuestBridgeProtocol.Status(Array(buffer.prefix(max(n, 0)))))
+        #expect(status.nonce == 0xC0FFEE && status.protocolVersion == 3)
+        let info = try #require(status.hostInfo)
+        #expect(info.name == "RAVE loopback host" && info.isAccepting && info.hostKind == .visionOSApp)
+        #expect(source.status.packetsReceived == 0)               // a probe is not a sender
+
+        if ProcessInfo.processInfo.environment["RAVE_QUEST_LIVE"] == "1" {
+            try await Task.sleep(for: .seconds(10))
+        }
     }
 }

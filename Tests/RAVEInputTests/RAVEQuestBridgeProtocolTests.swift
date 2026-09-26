@@ -129,11 +129,89 @@ struct RAVEQuestBridgeProtocolTests {
         #expect(RAVEQuestBridgeProtocol.Status(status) == reply)
     }
 
+    /// `qcb_status_ex_packet_t`: status at 0…15, then host_kind 16,
+    /// host_flags 17, name_length 18, reserved 19, name 20…63 zero-padded.
+    @Test("v3 probe reply: 16-byte status + 48-byte host info at the header's offsets")
+    func hostInfoGolden() throws {
+        var golden = [UInt8](repeating: 0, count: 64)
+        golden[0] = 0xF1
+        golden[1] = 3
+        put(UInt16(1), &golden, at: 2)
+        put(UInt32(0x01020304), &golden, at: 4)
+        put(UInt32(99), &golden, at: 8)
+        golden[16] = 1                                           // QCB_HOST_VISIONOS_APP
+        golden[17] = 1                                           // QCB_HOST_ACCEPTING
+        let name = Array("Ixion's Vision Pro".utf8)
+        golden[18] = UInt8(name.count)
+        for (i, b) in name.enumerated() { golden[20 + i] = b }
+
+        let reply = RAVEQuestBridgeProtocol.Status(
+            protocolVersion: 3, nonce: 0x01020304, packetsReceived: 99,
+            hostInfo: .init(kind: .visionOSApp, accepting: true, name: "Ixion's Vision Pro"))
+        #expect(reply.encoded() == golden)
+        let decoded = try #require(RAVEQuestBridgeProtocol.Status(golden))
+        #expect(decoded == reply)
+        let info = try #require(decoded.hostInfo)
+        #expect(info.hostKind == .visionOSApp && info.isAccepting && info.name == "Ixion's Vision Pro")
+        #expect(RAVEQuestBridgeProtocol.decode(golden) == .status(reply))
+
+        // Busy SteamVR driver: kind 2, flags 0.
+        var busy = golden
+        busy[16] = 2
+        busy[17] = 0
+        let busyInfo = try #require(RAVEQuestBridgeProtocol.Status(busy)?.hostInfo)
+        #expect(busyInfo.hostKind == .steamVRDriver && !busyInfo.isAccepting)
+        // Unknown kinds read as "other", not as a failure.
+        busy[16] = 200
+        #expect(RAVEQuestBridgeProtocol.Status(busy)?.hostInfo?.hostKind == .other)
+    }
+
+    @Test("Host info is read only at v3+ with all 64 bytes; heartbeats stay 16")
+    func hostInfoCompatibility() throws {
+        let full = RAVEQuestBridgeProtocol.Status(
+            protocolVersion: 3, nonce: 1, packetsReceived: 0,
+            hostInfo: .init(kind: .steamVRDriver, accepting: true, name: "PC")).encoded()
+        #expect(full.count == 64)
+        // An older host's 16-byte answer to a v3 probe: no host info, no failure.
+        let short = try #require(RAVEQuestBridgeProtocol.Status(Array(full.prefix(16))))
+        #expect(short.hostInfo == nil && short.nonce == 1)
+        // A v2 status never carries it, even if a datagram happened to be long.
+        var v2 = full
+        v2[1] = 2
+        #expect(try #require(RAVEQuestBridgeProtocol.Status(v2)).hostInfo == nil)
+        // Truncated trailer: ignored rather than half-read.
+        #expect(try #require(RAVEQuestBridgeProtocol.Status(Array(full.prefix(40)))).hostInfo == nil)
+        // A heartbeat (no host info) is the plain 16 bytes at any version.
+        #expect(RAVEQuestBridgeProtocol.Status(protocolVersion: 3, packetsReceived: 5).encoded().count == 16)
+        // A name_length past the field is clamped, not trusted.
+        var bogus = full
+        bogus[18] = 250
+        #expect(RAVEQuestBridgeProtocol.Status(bogus)?.hostInfo?.name.utf8.count == 44)
+    }
+
+    @Test("Host names are cut to 44 UTF-8 bytes at a character boundary")
+    func hostNameTruncation() throws {
+        let ascii = String(repeating: "a", count: 60)
+        #expect(RAVEQuestBridgeProtocol.HostInfo(kind: .other, accepting: true, name: ascii).name.utf8.count == 44)
+        // 43 ASCII bytes + a 2-byte "é" would be 45: the é is dropped whole.
+        let accented = String(repeating: "b", count: 43) + "é"
+        let cut = RAVEQuestBridgeProtocol.HostInfo(kind: .other, accepting: true, name: accented)
+        #expect(cut.name == String(repeating: "b", count: 43))
+        // A multi-scalar grapheme (flag, 8 bytes) never splits.
+        let flag = String(repeating: "c", count: 40) + "🇱🇹"
+        let flagCut = RAVEQuestBridgeProtocol.HostInfo(kind: .other, accepting: true, name: flag)
+        #expect(flagCut.name == String(repeating: "c", count: 40))
+        let bytes = RAVEQuestBridgeProtocol.Status(protocolVersion: 3, nonce: 0, packetsReceived: 0,
+                                                   hostInfo: cut).encoded()
+        #expect(bytes[18] == 43 && bytes[20 + 43] == 0)
+    }
+
     @Test("Version negotiation: answer at min(peer, ours), never below 1")
     func negotiation() {
         #expect(RAVEQuestBridgeProtocol.negotiatedVersion(peer: 0) == 1)
         #expect(RAVEQuestBridgeProtocol.negotiatedVersion(peer: 1) == 1)
         #expect(RAVEQuestBridgeProtocol.negotiatedVersion(peer: 2) == 2)
+        #expect(RAVEQuestBridgeProtocol.negotiatedVersion(peer: 3) == 3)
         #expect(RAVEQuestBridgeProtocol.negotiatedVersion(peer: 9) == RAVEQuestBridgeProtocol.version)
     }
 

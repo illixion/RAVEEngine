@@ -15,11 +15,17 @@
  `protocolVersion` and `sender`. A v1 packet therefore decodes with
  `protocolVersion == 0`, and `negotiatedVersion(peer:)` is what a host must
  answer with — a v1 Quest app rejects any status whose version is not exactly 1.
+ v3 adds discovery: a probe reply negotiated at v3+ appends a 48-byte
+ `HostInfo` (kind, accepting, name) after the 16-byte status, so an older
+ sender — which never announces v3 — never sees it, and an older host answers
+ a v3 probe with the plain 16 bytes.
  */
 
 /// Constants and codecs for the Controller Bridge UDP protocol.
 public enum RAVEQuestBridgeProtocol {
-    public static let version: UInt8 = 2
+    public static let version: UInt8 = 3
+    /// First version whose probe replies carry `HostInfo`.
+    public static let hostInfoVersion: UInt8 = 3
     public static let minimumVersion: UInt8 = 1
 
     /// Controller state (and probes) arrive here.
@@ -73,7 +79,19 @@ public enum RAVEQuestBridgeProtocol {
         case testTool = 2
     }
 
+    /// `qcb_host_info_t.host_kind` (v3).
+    public enum HostKind: UInt8, Sendable {
+        case other = 0
+        case visionOSApp = 1
+        case steamVRDriver = 2
+        case testTool = 3
+    }
+
     public static let statusDriverReady: UInt16 = 1 << 0
+    /// `QCB_HOST_ACCEPTING`: not streaming from a different sender right now.
+    public static let hostAccepting: UInt8 = 1 << 0
+    /// `QCB_HOST_NAME_MAX`, UTF-8 bytes.
+    public static let hostNameMaxBytes = 44
     public static let batteryUnknown: UInt8 = 0xFF
 
     /// The version to speak to a peer that announced `peer` (0 = a v1
@@ -276,21 +294,89 @@ public enum RAVEQuestBridgeProtocol {
         }
     }
 
+    /// `qcb_host_info_t`, 48 bytes (v3): who answered a probe. Appended to a
+    /// probe reply negotiated at v3 or later, never to a heartbeat.
+    public struct HostInfo: Sendable, Equatable {
+        public static let size = 48
+        /// Raw `host_kind`; see `hostKind`.
+        public var kind: UInt8
+        /// Raw `host_flags`; see `isAccepting`.
+        public var flags: UInt8
+        /// At most `hostNameMaxBytes` of UTF-8; `init` cuts longer names at a
+        /// character boundary.
+        public private(set) var name: String
+
+        public init(kind: HostKind, accepting: Bool, name: String) {
+            self.init(rawKind: kind.rawValue, flags: accepting ? RAVEQuestBridgeProtocol.hostAccepting : 0,
+                      name: name)
+        }
+
+        public init(rawKind: UInt8, flags: UInt8, name: String) {
+            self.kind = rawKind
+            self.flags = flags
+            self.name = Self.truncated(name)
+        }
+
+        public var hostKind: HostKind { HostKind(rawValue: kind) ?? .other }
+        public var isAccepting: Bool { flags & RAVEQuestBridgeProtocol.hostAccepting != 0 }
+
+        /// `name` cut to the field, whole characters only (a grapheme never
+        /// splits, so the Quest never shows half an emoji).
+        static func truncated(_ name: String) -> String {
+            var out = ""
+            var bytes = 0
+            for character in name {
+                let n = character.utf8.count
+                if bytes + n > RAVEQuestBridgeProtocol.hostNameMaxBytes { break }
+                out.append(character)
+                bytes += n
+            }
+            return out
+        }
+
+        /// Reads the 48 bytes starting at `offset`.
+        init(bytes: UnsafeRawBufferPointer, offset: Int) {
+            kind = bytes[offset]
+            flags = bytes[offset + 1]
+            let length = min(Int(bytes[offset + 2]), RAVEQuestBridgeProtocol.hostNameMaxBytes)
+            let start = offset + 4
+            name = String(decoding: UnsafeRawBufferPointer(rebasing: bytes[start..<start + length]),
+                          as: UTF8.self)
+        }
+
+        fileprivate func encode(into w: inout ByteWriter) {
+            let utf8 = Array(name.utf8.prefix(RAVEQuestBridgeProtocol.hostNameMaxBytes))
+            w.u8(kind)
+            w.u8(flags)
+            w.u8(UInt8(utf8.count))
+            w.u8(0)                                  // reserved
+            for b in utf8 { w.u8(b) }
+            for _ in utf8.count..<RAVEQuestBridgeProtocol.hostNameMaxBytes { w.u8(0) }
+        }
+    }
+
     /// `qcb_status_packet_t`, 16 bytes, host → Quest: a probe reply (nonce
-    /// echoed) or an unsolicited heartbeat (nonce 0).
+    /// echoed) or an unsolicited heartbeat (nonce 0). A probe reply at v3+
+    /// carries `hostInfo` too (`qcb_status_ex_packet_t`, 64 bytes).
     public struct Status: Sendable, Equatable {
         public static let size = 16
+        /// With the host-info trailer.
+        public static let extendedSize = 64
         public var protocolVersion: UInt8
         public var flags: UInt16
         public var nonce: UInt32
         public var packetsReceived: UInt32
+        /// Encoded only when set; decoded only when `protocolVersion` >= 3 and
+        /// the datagram holds all 64 bytes (a shorter one is an older host).
+        public var hostInfo: HostInfo?
 
         public init(protocolVersion: UInt8, flags: UInt16 = RAVEQuestBridgeProtocol.statusDriverReady,
-                    nonce: UInt32 = 0, packetsReceived: UInt32) {
+                    nonce: UInt32 = 0, packetsReceived: UInt32, hostInfo: HostInfo? = nil) {
             self.protocolVersion = protocolVersion
             self.flags = flags
             self.nonce = nonce
             self.packetsReceived = packetsReceived
+            self.hostInfo = hostInfo
         }
 
         public init?(bytes: UnsafeRawBufferPointer) {
@@ -300,6 +386,9 @@ public enum RAVEQuestBridgeProtocol {
             flags = r.u16()
             nonce = r.u32()
             packetsReceived = r.u32()
+            if protocolVersion >= RAVEQuestBridgeProtocol.hostInfoVersion, bytes.count >= Self.extendedSize {
+                hostInfo = HostInfo(bytes: bytes, offset: Self.size)
+            }
         }
 
         public init?(_ bytes: [UInt8]) {
@@ -308,13 +397,14 @@ public enum RAVEQuestBridgeProtocol {
         }
 
         public func encoded() -> [UInt8] {
-            var w = ByteWriter(capacity: Self.size)
+            var w = ByteWriter(capacity: Self.extendedSize)
             w.u8(PacketType.status.rawValue)
             w.u8(protocolVersion)
             w.u16(flags)
             w.u32(nonce)
             w.u32(packetsReceived)
             w.u32(0)                                 // reserved
+            hostInfo?.encode(into: &w)
             return w.bytes
         }
     }
