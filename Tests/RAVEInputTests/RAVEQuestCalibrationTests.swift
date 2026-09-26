@@ -212,16 +212,15 @@ struct RAVEQuestCalibrationTests {
         #expect(cal.sampleCount <= 40)                            // the old arc is gone, not diluted
     }
 
-    /// Wide wrist rotation during the sampling is the realistic case, and the
-    /// one the three alternating rounds do not fully converge on: the offset
-    /// term no longer vanishes at the per-hand centroid when the controller
-    /// spins, and three rounds leave ~4 mm RMS and ~0.6° of yaw on this ring.
-    /// This test pins the port to the original C++ solver's output on the
-    /// identical input (compiled and run against quest_calibration.cpp), so
-    /// "faithful port" is a measured claim; changing the round count is a
-    /// deliberate behaviour change that must update these numbers.
-    @Test("Matches the reference C++ solver on a rotating-controller ring")
-    func rotatingOffsetMatchesReference() throws {
+    /// Wide wrist rotation during the sampling is the realistic case: the
+    /// offset term no longer vanishes at the per-hand centroid when the
+    /// controller spins. The Longwave C++ original's three alternating rounds
+    /// left ~4 mm RMS and ~0.6° of yaw on exactly this ring (residual
+    /// 4.051619 mm, yaw -0.861960 against a true -0.872665); `offsetRounds` = 20
+    /// converges it to float noise, and this test holds it there — dropping the
+    /// round count back fails it.
+    @Test("Converges on a widely rotating-controller ring")
+    func rotatingOffsetConverges() throws {
         var cal = RAVEQuestCalibration()
         let yaw: Float = -50 * .pi / 180
         let t = SIMD3<Float>(-0.3, 0.2, 0.6)
@@ -239,14 +238,55 @@ struct RAVEQuestCalibrationTests {
         }
         let solved = cal.maybeSolve()
         #expect(solved)
-        // quest_calibration.cpp on the same ring: residual 4.051619 mm,
-        // "v1 -0.861960 -0.2998 0.1730 0.5941 0.0272 -0.0142 0.0562 -0.0132 -0.0116 0.0539"
-        #expect(abs(cal.residualMm - 4.0516) < 0.01)
+        #expect(cal.residualMm < 0.05)                            // was 4.05 mm at 3 rounds
         let transform = try #require(cal.transform)
-        #expect(abs(transform.yaw - -0.861960) < 1e-4)
-        #expect(simd_distance(transform.translation, SIMD3(-0.2998, 0.1730, 0.5941)) < 2e-4)
-        #expect(simd_distance(transform.leftOffset, SIMD3(0.0272, -0.0142, 0.0562)) < 2e-4)
-        #expect(simd_distance(transform.rightOffset, SIMD3(-0.0132, -0.0116, 0.0539)) < 2e-4)
+        #expect(abs(transform.yaw - yaw) < 1e-4)                  // was 0.6° off
+        // Translation and offsets are only determined up to a shared shift
+        // along the ring's single rotation axis (a body-frame offset along the
+        // axis every sample spins about looks like a world translation), so
+        // pin what the app consumes instead: placement of an unsampled pose.
+        let probe = SIMD3<Float>(0.05, 1.2, -0.3)
+        let probeRot = simd_quatf(angle: 2.2, axis: simd_normalize(SIMD3(0.3, 1, 0.2)))
+        for (hand, off) in [(RAVEHandChirality.left, offL), (.right, offR)] {
+            let got = cal.apply(hand, position: probe, rotation: probeRot).position
+            #expect(simd_distance(got, place(probe, probeRot, off)) < 1e-4)
+        }
+    }
+
+    /// The solve runs every `resolveEverySamples` pairs from whatever thread
+    /// feeds the hands (possibly a render loop), so 20 rounds must stay cheap
+    /// at the worst case: both rings full, every robust pass taken.
+    @Test("A full-ring solve stays far below a frame")
+    func fullRingSolveCost() {
+        var cal = RAVEQuestCalibration()
+        let yaw: Float = 0.7
+        let t = SIMD3<Float>(0.1, -0.2, 0.3)
+        let yawQ = RAVEQuestCalibration.yawQuat(yaw)
+        let n = RAVEQuestCalibration.maxSamplesPerHand
+        for i in 0..<n {
+            for hand in RAVEHandChirality.allCases {
+                // A widening spiral with ~10 cm steps, so the 3 cm spacing
+                // gate keeps every pair and both rings fill.
+                let a = Float(i) * 0.4
+                let r = 0.15 + 0.25 * Float(i) / Float(n)
+                let q = SIMD3<Float>(hand == .left ? -0.3 : 0.3, 1, -0.4)
+                    + SIMD3(r * cos(a), 0.1 * sin(3 * a), r * sin(a))
+                let rot = simd_quatf(angle: a, axis: simd_normalize(SIMD3(0.3, 1, 0.2)))
+                // Every 7th pair is a wrong pairing, so the robust passes run.
+                let wrong = i % 7 == 0 ? SIMD3<Float>(0.4, 0, -0.3) : .zero
+                let ref = RAVEQuestCalibration.rotateYaw(yaw, q) + t
+                    + (yawQ * rot).act(hand == .left ? offL : offR) + wrong
+                cal.addSample(hand, questPosition: q, questRotation: rot, reference: ref)
+            }
+        }
+        #expect(cal.sampleCount == 2 * n)
+        let clock = ContinuousClock()
+        let elapsed = clock.measure { _ = cal.maybeSolve() }
+        #expect(cal.isCalibrated)
+        // Measured on an M-series Mac: ~0.2 ms release, ~7.5 ms in an -Onone
+        // debug build (it was ~34 ms before the rounds exited on convergence).
+        // The bound is loose for slow machines; it runs once per 12 new pairs.
+        #expect(elapsed < .milliseconds(25), "full-ring solve took \(elapsed)")
     }
 }
 

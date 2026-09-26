@@ -221,12 +221,16 @@ The Quest poses are in the Quest's own stage space, so the source aligns them it
 ARKit hands the app feeds in (`observeHands`, a `RAVEHandSample` per side — it never opens an
 ARKit session). `RAVEQuestCalibration` (4-DoF yaw + translation Kabsch, per-hand grip offset,
 weights, robust re-solve, 60 s ageing, 24 samples / 0.25 m spread), `RAVEQuestHoldDetector`
-(put-down vs moved desk) and the watchdog loop in `RAVEQuestAlignment` are **faithful ports
-of the Longwave PCVR host's C++**, constants and tests included; one test pins the Swift
-output to the C++ solver's numbers on an identical ring. Known property of that original, not
-fixed here on purpose: its three alternating offset rounds do not converge when the
-controller rotates widely during sampling (~4 mm RMS, ~0.6° yaw on the pinned ring; 20 rounds
-reach float noise). Changing the round count is a behaviour change — update the pinned test.
+(put-down vs moved desk) and the watchdog loop in `RAVEQuestAlignment` are **ports of the
+Longwave PCVR host's C++**, constants and tests included, with **one deliberate departure**:
+`RAVEQuestCalibration.offsetRounds` is 20, not the original's 3 (user-approved 2026-09-26).
+Three alternating offset rounds do not converge when the controller rotates widely during
+sampling — the realistic case — and left ~4 mm RMS / ~0.6° yaw on the test ring; 20 reach
+float noise, and `rotatingOffsetConverges` holds that (dropping the count back fails it).
+Rounds exit early once the offsets move < 1 µm, so clean rings cost a few rounds; the
+worst-case full-ring solve is ~0.2 ms optimised / ~7.5 ms at -Onone, and it runs under the
+source's lock that `poll()` also takes — `fullRingSolveCost` guards it. The Longwave host's
+C++ copy is changed separately; until it is, the two solvers differ on rotating rings.
 
 A persisted transform is restored **untrusted** by default (`trustRestoredCalibration =
 false`): ARKit re-establishes its world origin every session, so last launch's transform is

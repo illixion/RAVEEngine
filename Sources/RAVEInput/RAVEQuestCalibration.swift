@@ -37,7 +37,8 @@
      tracks drift instead of averaging the whole session into a stale mean.
 
  Ported from the Longwave PCVR host's C++ solver, constants and all; the unit
- tests are ported with it. Pure arithmetic, an isolation-free value type: the
+ tests are ported with it. One deliberate departure: `offsetRounds` is 20, not
+ the original's 3, so the offset solve converges under wide wrist rotation. Pure arithmetic, an isolation-free value type: the
  owner calls it from whatever thread samples the hands.
 
  Rotation convention, everywhere in this file: yaw is a right-handed rotation
@@ -71,6 +72,24 @@ public struct RAVEQuestCalibration: Sendable {
     /// because starving the ring is worse than a noisy contribution the robust
     /// pass can still demote.
     public static let minWeight: Float = 0.05
+    /// Alternating rigid-solve / offset-estimate rounds per solve pass.
+    ///
+    /// The Longwave C++ original runs 3, which is exact when the controller
+    /// barely rotates during sampling — the offset then vanishes at each hand's
+    /// centroid — but not when the wrist turns widely, which is the realistic
+    /// case: the offset term then leans the yaw and each round only removes
+    /// part of that lean. On the widely rotating test ring three rounds left
+    /// ~4 mm RMS and ~0.6° of yaw; 20 reach float noise. Raised deliberately
+    /// (2026-09-26), a behaviour change from the C++ host, pinned by the
+    /// convergence test. Rounds stop early once the offsets settle
+    /// (`offsetConvergedMeters`), and the worst case — both 120-sample rings
+    /// full, every robust pass taken — measured ~0.2 ms optimised (~7.5 ms in
+    /// an -Onone debug build), once per `resolveEverySamples` new pairs. That
+    /// runs inside the source's lock, so keep an eye on it if this grows.
+    public static let offsetRounds = 20
+    /// A pass stops its rounds early once neither hand's offset moves more
+    /// than this between rounds.
+    public static let offsetConvergedMeters: Float = 1e-6
     /// Robust pass: residuals beyond this many medians are downweighted by
     /// (threshold/residual)⁴.
     public static let outlierMedians: Float = 3.0
@@ -289,13 +308,14 @@ public struct RAVEQuestCalibration: Sendable {
         // DIFFER between hands they do not cancel at the centroid — a one-shot
         // solve leaves a few millimetres of structured error. So alternate:
         // rigid solve against offset-corrected references, re-estimate the
-        // offsets from the leftovers, repeat. The offsets are centimetres
-        // against a solve spread of decimetres, so three rounds land within
-        // float noise of exact on clean data (pinned by the unit tests).
+        // offsets from the leftovers, repeat, `offsetRounds` times (see there
+        // for why that is 20 and not the original's 3).
         func effW(_ hand: Int, _ i: Int) -> Float { samples[hand][i].weight * robust[hand][i] }
 
         handOffset = [.zero, .zero]
-        for _ in 0..<3 {
+        var corrected: [SIMD3<Float>] = []
+        corrected.reserveCapacity(Self.maxSamplesPerHand)
+        for _ in 0..<Self.offsetRounds {
             // Centroids over every kept pair, both hands together — one desk
             // headset, one transform, the second hand only adds constraint.
             // References are corrected by the current offset estimate (zero on
@@ -317,10 +337,13 @@ public struct RAVEQuestCalibration: Sendable {
             for hand in 0..<2 where count[hand] > 0 {
                 var hq = SIMD3<Float>.zero, hr = SIMD3<Float>.zero
                 var handW: Float = 0
+                corrected.removeAll(keepingCapacity: true)
                 for i in 0..<count[hand] {
                     let w = effW(hand, i)
+                    let ref = correctedRef(hand, samples[hand][i])
+                    corrected.append(ref)
                     hq += w * samples[hand][i].quest
-                    hr += w * correctedRef(hand, samples[hand][i])
+                    hr += w * ref
                     handW += w
                 }
                 if handW <= 0 { continue }
@@ -331,7 +354,7 @@ public struct RAVEQuestCalibration: Sendable {
                 totalW += handW
                 for i in 0..<count[hand] {
                     let w = effW(hand, i)
-                    let ref = correctedRef(hand, samples[hand][i])
+                    let ref = corrected[i]
                     let qx = samples[hand][i].quest.x - hq.x
                     let qz = samples[hand][i].quest.z - hq.z
                     let rx = ref.x - hr.x
@@ -365,6 +388,14 @@ public struct RAVEQuestCalibration: Sendable {
                 }
                 handOffset[hand] = handW > 0 ? acc / handW : .zero
             }
+
+            // Converged: the offsets stopped moving (sub-micron, float noise
+            // at metre scale). Clean rings with little wrist rotation get here
+            // in a few rounds, so the raised cap costs only the rings that
+            // need it.
+            let moved = max(simd_distance(handOffset[0], offsets[0]),
+                            simd_distance(handOffset[1], offsets[1]))
+            if moved < Self.offsetConvergedMeters { break }
         }
     }
 
