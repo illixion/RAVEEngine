@@ -118,6 +118,27 @@ public struct LegStepper: Sendable {
         closedThisStop = 0
     }
 
+    /// Takes over feet that something else has been moving — a walk clip —
+    /// so the next `settle` brings them to a stand from where they really
+    /// are, instead of from footprints this stepper never laid.
+    ///
+    /// A clip-driven walk that simply cross-fades into idle realigns the legs
+    /// from whatever point of the stride it stopped at. Handed over here, the
+    /// airborne foot is put down first and the trailing one closed up at
+    /// walking pace, the same stop the placed legs get.
+    ///
+    /// - Parameters: world positions of each foot's ground contact, and
+    ///   whether each one is on the ground. A foot off the ground is treated
+    ///   as mid-swing.
+    public mutating func takeOver(left: SIMD3<Float>, right: SIMD3<Float>,
+                                  leftPlanted: Bool, rightPlanted: Bool) {
+        reset()
+        for (foot, position, planted) in [(0, left, leftPlanted), (1, right, rightPlanted)] {
+            wasPlanted[foot] = planted
+            if planted { plant[foot] = position } else { swinging[foot] = position }
+        }
+    }
+
     /// Where the closing foot is headed, kept for the diagnostics.
     private var closeTarget: SIMD3<Float>?
 

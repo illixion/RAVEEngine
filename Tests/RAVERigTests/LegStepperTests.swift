@@ -505,4 +505,35 @@ struct LegStepperStopStartTests {
         }
         #expect(largestJump(frames) < 0.1, "a foot jumped \(largestJump(frames)) m when a walk began mid-close")
     }
+
+    /// Feet a walk clip left mid-stride come to a stand from where they
+    /// are: the airborne one continues from its own position rather than
+    /// jumping, the planted one holds until it is its turn, and both end up
+    /// standing.
+    @Test func takingOverClipFeetSettlesFromWhereTheyAre() {
+        var stepper = LegStepper(stepLength: 0.4, footSpacing: 0.3)
+        let hips = SIMD3<Float>(0, 0, 0)
+        let forward = SIMD3<Float>(0, 0, -1)
+        // Foot 0 sits at -x for this heading; it is in the air, ahead.
+        let airborne = SIMD3<Float>(-0.15, 0.05, -0.2)
+        let planted = SIMD3<Float>(0.15, 0, 0.2)
+        stepper.takeOver(left: airborne, right: planted, leftPlanted: false, rightPlanted: true)
+
+        var result = stepper.settle(hips: hips, forward: forward, closing: 0.01, floor: { _ in 0 })
+        // One frame of swing: 0.01 of hip travel moves a swinging foot about
+        // 0.036, plus the lift arc. A jump back to a footprint would be 0.2+.
+        #expect(simd_distance(result.left.position, airborne) < 0.06)
+        #expect(result.right.planted)
+        #expect(result.right.position == planted)
+        var frames = 1
+        while !result.settled && frames < 500 {
+            result = stepper.settle(hips: hips, forward: forward, closing: 0.01, floor: { _ in 0 })
+            frames += 1
+        }
+        #expect(result.settled)
+        #expect(result.left.planted && result.right.planted)
+        // Standing: both feet under the hips, about hip-width apart.
+        #expect(abs(result.left.position.z) < 0.13 && abs(result.right.position.z) < 0.13)
+        #expect(abs(simd_distance(result.left.position, result.right.position) - 0.3) < 0.06)
+    }
 }
