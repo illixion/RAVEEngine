@@ -52,7 +52,7 @@ sits behind `RAVEHandInputProvider`, which returns `RAVENoHandInput` off-visionO
 
 | Target | Purpose |
 |---|---|
-| `RAVEInput` | Hand + controller sensing, pinch/joystick/palm geometry, binding tables |
+| `RAVEInput` | Hand + controller sensing, pinch/joystick/palm geometry, binding tables, tracked controllers (PSVR2 Sense; Quest Touch over the LAN via Controller Bridge) |
 | `RAVEDiagnostics` | Frame profiler, metric collector, feed gating, HUD views |
 | `RAVERig` | Skeleton geometry, humanoid inference, FABRIK, pose solving, leg stepping — shipping, see README |
 | `RAVEHolo` | In-world holographic UI for Metal hosts: SDF glyph atlas (CoreText, no font shipped), panel/gauge/text scene, Metal 4 renderer drawing into a pass the host owns. Shader source compiles at runtime (SwiftPM's CLI builds no `.metal`); `RAVEHOLO_SNAPSHOT=/x.png swift test --filter RAVEHolo` renders a sample panel to look at. Renderer is `@available(macOS 26)` (Metal 4) without raising the package floor. Consumer: LambdaVision's HEV HUD |
@@ -83,6 +83,17 @@ just because it's "PCVR-related." Only extract a piece into `RAVEPCVR` once a se
 consumer actually needs that exact piece, the same convergence rule every other target here
 followed (see "Working on this codebase" below).
 
+**The Quest Controller Bridge protocol is not that protocol, and lives in `RAVEInput`.**
+Decided 2026-09-26. `RAVEPCVR`'s reservation is for Longwave's *headset → PC host* bridge
+(the AVP streaming its hands and gamepads to a SteamVR host). The Controller Bridge protocol
+(`RAVEQuestBridgeProtocol`, canonical header in `illixion/controller-bridge`) runs the other
+way round: a Quest streams its Touch controllers *to* the visionOS app, which consumes them
+as input exactly like a `GCController`. So the codec, the socket (`RAVEQuestBridgeSource`)
+and the calibration it needs are sensing, polled through the same
+`RAVETrackedControllerSource` protocol as the PSVR2 Sense backend, and every app that links
+`RAVEInput` gets them with no new product to add. Only if the AVP → PC protocol is ever
+shared does `RAVEPCVR` get built; the Quest pieces stay here either way.
+
 ## The isolation rule (both targets)
 
 **The collection and sensing layers carry no isolation. This is a hard constraint, not a
@@ -94,10 +105,15 @@ loop. The other consumers drive the same code from `@MainActor`. So:
 
 - `RAVEPinchDetector`, `RAVEHandJoystick`, `RAVEArmSwinger`, `RAVEPalmGeometry`, `RAVEEdgeTracker`,
   `RAVEGestureGate`, `RAVEPalmFacingGate`, `RAVEHandOwnership`, `RAVESystemPinchGate`,
-  `RAVEStickShaping`/`RAVESnapTurnDetector`, `RAVESampleSeries` are **isolation-free value types**
-- `RAVEMetricCollector` is a **lock-guarded class**, `@unchecked Sendable` — an actor would
-  make `record()` async and unusable from exactly the callers that need it most
-- `RAVEARKitHandSensor` and the SwiftUI views are the `@MainActor` conveniences *on top*
+  `RAVEStickShaping`/`RAVESnapTurnDetector`, `RAVESampleSeries`, `RAVEQuestCalibration`,
+  `RAVEQuestHoldDetector`, `RAVEQuestAlignment`, `RAVEQuestBridgeProtocol` are **isolation-free value types**
+- `RAVEMetricCollector` and `RAVEQuestBridgeSource` are **lock-guarded classes**, `@unchecked
+  Sendable` — an actor would make `record()` / `poll()` async and unusable from exactly the
+  callers that need them most
+- `RAVEARKitHandSensor` and the SwiftUI views are the `@MainActor` conveniences *on top*;
+  `RAVESpatialAccessorySource` is `@MainActor` for its lifecycle only — its
+  `RAVETrackedControllerSource` witnesses (`poll`, `sendHaptic`) are `nonisolated` over a
+  lock-guarded store, and must stay that way
 
 Making any of the first two groups an actor, or `@MainActor`, breaks a consumer that cannot
 be fixed on its side.
@@ -183,6 +199,39 @@ The shared default deadzone is 3 cm. Zero made normal ARKit wrist jitter into mo
 the two consumers that did not override it; Lambda's long-standing 3 cm setting was the
 proven behavior. `RAVEJoystickOutput.visualization` is the renderer-neutral overlay seam —
 keep it plain SIMD data rather than importing RealityKit or a Metal renderer here.
+
+### Tracked controllers
+
+`RAVETrackedControllerSource` (`poll(now:)`, `sendHaptic(_:)`, both nonisolated) with plain
+`RAVETrackedControllerState` values per hand: pose in the **ARKit world**, `isTracked`,
+`isInHand`, trigger, analog grip, stick, `RAVEControllerButtons` (position-named: `primary`
+is A/X/Cross/Square) with capacitive touch bits gated by `touchValid`, battery. Two backends:
+
+- **`RAVESpatialAccessorySource`** (visionOS only) — lifted from Longwave's
+  `SpatialAccessoryTracker`: `GCProductCategorySpatialController` + ARKit
+  `AccessoryTrackingProvider`, chirality from `heldChirality ?? inherentChirality`, CoreHaptics
+  per side. **Never run on hardware.** Longwave still carries its own copy until it adopts this.
+- **`RAVEQuestBridgeSource`** — a Quest on the desk running the Controller Bridge app streams
+  Touch controllers over UDP :9520. Opt-in: nothing listens until `start()`. Answers probes,
+  sends the status heartbeat the Quest app's "connected" pulse waits for, sends haptics to
+  sender:9521, optionally advertises `_controllerbridge._udp`. Apps need
+  `NSLocalNetworkUsageDescription` (and `NSBonjourServices` when advertising).
+
+The Quest poses are in the Quest's own stage space, so the source aligns them itself against
+ARKit hands the app feeds in (`observeHands`, a `RAVEHandSample` per side — it never opens an
+ARKit session). `RAVEQuestCalibration` (4-DoF yaw + translation Kabsch, per-hand grip offset,
+weights, robust re-solve, 60 s ageing, 24 samples / 0.25 m spread), `RAVEQuestHoldDetector`
+(put-down vs moved desk) and the watchdog loop in `RAVEQuestAlignment` are **faithful ports
+of the Longwave PCVR host's C++**, constants and tests included; one test pins the Swift
+output to the C++ solver's numbers on an identical ring. Known property of that original, not
+fixed here on purpose: its three alternating offset rounds do not converge when the
+controller rotates widely during sampling (~4 mm RMS, ~0.6° yaw on the pinned ring; 20 rounds
+reach float noise). Changing the round count is a behaviour change — update the pinned test.
+
+A persisted transform is restored **untrusted** by default (`trustRestoredCalibration =
+false`): ARKit re-establishes its world origin every session, so last launch's transform is
+right only when the origin lands in the same place. Untrusted, it publishes nothing until one
+fresh pair agrees, and the watchdog discards it within a second when none does.
 
 **`RAVEFingerBindingTable`'s `Codable` is hand-written and wire-compatible.** It emits the
 same named fields (`rightIndex`, `rightMiddle`, …) two apps already have in `UserDefaults`,

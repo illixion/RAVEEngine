@@ -32,10 +32,10 @@ and head pose. Hand input sits behind `RAVEHandInputProvider`, which returns
 
 | Target | Status | Purpose |
 |---|---|---|
-| `RAVEInput` | shipping | Hand and controller sensing, pinch/joystick/palm geometry, binding tables |
+| `RAVEInput` | shipping | Hand and controller sensing, pinch/joystick/palm geometry, binding tables, tracked controllers |
 | `RAVEDiagnostics` | shipping | Frame profiler, metric collector, feed gating, HUD views |
 | `RAVERig` | shipping | Skeleton geometry, humanoid inference, FABRIK, pose solving, leg stepping, tail dynamics |
-| `RAVEPCVR` | planned | Only the reusable controller-bridge *protocol*, once a second app needs it — not Longwave's PCVR feature as a whole (paywall, session limiting, CloudXR host stay Longwave-only and mostly closed-source; see this repo's CLAUDE.md) |
+| `RAVEPCVR` | planned | Only the reusable headset → PC controller-bridge *protocol*, once a second app needs it — not Longwave's PCVR feature as a whole (paywall, session limiting, CloudXR host stay Longwave-only and mostly closed-source; see this repo's CLAUDE.md). The Quest Controller Bridge protocol is a different thing and ships in `RAVEInput` |
 
 ## RAVEInput
 
@@ -90,6 +90,41 @@ rather than leaving every app to:
 by default), and `RAVEHandSample` size-normalised metrics (`palmLength`,
 `indexExtensionRatio`, `thumbExtensionRatio`, `curlRatio`, `fingertipSpreadToThumb`).
 The thresholds are unverified on device.
+
+### Tracked controllers
+
+`RAVETrackedControllerSource` is the seam for a controller that knows where it is. Poll it
+from any thread; every pose is already in the ARKit world, so it can replace a wrist pose
+directly.
+
+| Backend | Device | Notes |
+|---|---|---|
+| `RAVESpatialAccessorySource` | PSVR2 Sense and other spatial controllers | visionOS only; ARKit accessory tracking; untested on hardware |
+| `RAVEQuestBridgeSource` | Quest Touch controllers, via a Quest on the desk running [Controller Bridge](https://github.com/illixion/controller-bridge) | UDP :9520, opt-in; calibrates itself against the ARKit hands you feed it |
+
+```swift
+let quest = RAVEQuestBridgeSource(configuration: {
+    var c = RAVEQuestBridgeSource.Configuration()
+    c.advertise = true            // Info.plist: NSBonjourServices = _controllerbridge._udp
+    return c
+}())
+try quest.start()                 // Info.plist: NSLocalNetworkUsageDescription
+
+// every frame, from whatever thread already has the hands:
+quest.observeHands(left: sensor.sample(for: .left), right: sensor.sample(for: .right),
+                   now: CACurrentMediaTime())
+let controllers = quest.poll(now: CACurrentMediaTime())
+if let right = controllers.trackedPose(.right) { /* use right.transform, right.trigger … */ }
+
+// HUD, ~10 Hz: idle / seen / collecting(samples, spread) / calibrated(residual) / lost
+let status = quest.status
+```
+
+Calibration is continuous: hold the controllers and move your arms; the controllers pulse
+twice when it lands. A controller put down on the desk hands its side back to hand tracking
+(`isInHand == false`), and moving the Quest makes the source start over. The solver, hold
+detector and watchdog are ports of the Longwave PCVR host's C++ with its tests; see
+CLAUDE.md for the one known limitation carried over.
 
 ### No isolation in the sensing layer
 
