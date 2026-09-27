@@ -53,7 +53,8 @@ public struct RAVEHoloPalmAnchor: Sendable {
 
     /// Whether the panel should be drawn (and its targets registered).
     public var isVisible: Bool { opacity > 0 && position != nil }
-    /// Whether the gate is open — the panel is showing or fading in.
+    /// Whether the gate is open — the panel is showing or fading in. (Not
+    /// meaningful with the externally-gated `update(…, shown:)`.)
     public var isShown: Bool { gate.isShown }
 
     /// Panel-local → world: centre at `position`, facing `viewer`, upright.
@@ -69,6 +70,19 @@ public struct RAVEHoloPalmAnchor: Sendable {
                                 showAllowed: Bool = true, keepAllowed: Bool = true) -> RAVEGestureGateOutput {
         let out = gate.update(pose: pose, head: head, now: now,
                               showAllowed: showAllowed, keepAllowed: keepAllowed)
+        advance(pose: pose, head: head, now: now, shown: out.engaged)
+        return out
+    }
+
+    /// Advance with the show/hide decision made by the host — for an app
+    /// that already runs its own palm gate (Oneiros's GameManager decides
+    /// visibility for both of its hosts) and wants only placement, following
+    /// and fades from here. `gate` is not consulted.
+    public mutating func update(pose: RAVEPalmPose?, head: SIMD3<Float>, now: TimeInterval, shown: Bool) {
+        advance(pose: pose, head: head, now: now, shown: shown)
+    }
+
+    private mutating func advance(pose: RAVEPalmPose?, head: SIMD3<Float>, now: TimeInterval, shown: Bool) {
         let dt = lastUpdate.map { max(0, min(0.1, now - $0)) } ?? 0
         lastUpdate = now
         viewer = head
@@ -84,13 +98,12 @@ public struct RAVEHoloPalmAnchor: Sendable {
         }
         // Untracked: stay where it was and fade there.
 
-        if out.engaged, position != nil {
+        if shown, position != nil {
             opacity = tuning.fadeIn > 0 ? min(1, opacity + Float(dt / tuning.fadeIn)) : 1
             if opacity == 0 { opacity = Float.ulpOfOne }   // first frame counts as shown
         } else {
             opacity = tuning.fadeOut > 0 ? max(0, opacity - Float(dt / tuning.fadeOut)) : 0
         }
-        return out
     }
 
     public mutating func reset() {

@@ -212,6 +212,19 @@ import simd
         #expect(simd_distance(a.position!, target) < 0.001)
     }
 
+    @Test func externallyGatedAnchorFollowsTheHostsDecision() {
+        var a = RAVEHoloPalmAnchor(tuning: .offPalm)
+        // Palm turned away, but the host says shown: placement still works.
+        let away = Self.pose(toward: SIMD3(0, 1.2, -2))
+        var t: TimeInterval = 0
+        while t < 0.3 { a.update(pose: away, head: Self.head, now: t, shown: true); t += 1.0 / 90 }
+        #expect(a.opacity == 1)
+        let expected = Self.palm + away.palmNormalOut * 0.18
+        #expect(simd_distance(a.position!, expected) < 1e-4)
+        while t < 0.6 { a.update(pose: away, head: Self.head, now: t, shown: false); t += 1.0 / 90 }
+        #expect(!a.isVisible)
+    }
+
     @Test func trackingLossFadesInPlace() {
         var a = RAVEHoloPalmAnchor(gate: .panel, tuning: .overPalm)
         let t = Self.run(&a, from: 0, seconds: 0.4, pose: Self.pose())
