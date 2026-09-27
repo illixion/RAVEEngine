@@ -332,22 +332,27 @@ import simd
         let peak = stride(from: 0, to: img.count, by: 4).map { img[$0] }.max() ?? 0
         #expect(peak > 0.6)
         if let path = ProcessInfo.processInfo.environment["RAVEHOLO_LAYOUT_SNAPSHOT"] {
-            let w = 768, hPx = 384
-            var bytes = [UInt8](repeating: 255, count: w * hPx * 4)
-            for i in 0..<(w * hPx) {
-                for c in 0..<3 {
-                    let linear = max(0, min(1, img[i * 4 + c]))
-                    let srgb = linear <= 0.0031308 ? 12.92 * linear : 1.055 * pow(linear, 1 / 2.4) - 0.055
-                    bytes[i * 4 + c] = UInt8(srgb * 255)
-                }
+            try Self.write(img, to: path)
+        }
+    }
+
+    /// Linear RGBA from `renderOnBlack` (768 × 384) → sRGB PNG.
+    static func write(_ img: [Float], to path: String, width w: Int = 768) throws {
+        let hPx = w / 2
+        var bytes = [UInt8](repeating: 255, count: w * hPx * 4)
+        for i in 0..<(w * hPx) {
+            for c in 0..<3 {
+                let linear = max(0, min(1, img[i * 4 + c]))
+                let srgb = linear <= 0.0031308 ? 12.92 * linear : 1.055 * pow(linear, 1 / 2.4) - 0.055
+                bytes[i * 4 + c] = UInt8(srgb * 255)
             }
-            let ctx = CGContext(data: &bytes, width: w, height: hPx, bitsPerComponent: 8, bytesPerRow: w * 4,
-                                space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
-            if let image = ctx?.makeImage(),
-               let dest = CGImageDestinationCreateWithURL(URL(fileURLWithPath: path) as CFURL, "public.png" as CFString, 1, nil) {
-                CGImageDestinationAddImage(dest, image, nil)
-                CGImageDestinationFinalize(dest)
-            }
+        }
+        let ctx = CGContext(data: &bytes, width: w, height: hPx, bitsPerComponent: 8, bytesPerRow: w * 4,
+                            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
+        if let image = ctx?.makeImage(),
+           let dest = CGImageDestinationCreateWithURL(URL(fileURLWithPath: path) as CFURL, "public.png" as CFString, 1, nil) {
+            CGImageDestinationAddImage(dest, image, nil)
+            CGImageDestinationFinalize(dest)
         }
     }
 }
