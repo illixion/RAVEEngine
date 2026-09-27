@@ -47,6 +47,10 @@ public struct RAVEHoloPanel: Sendable {
     /// Per-panel phase for the flicker, so panels don't pulse in lockstep.
     public var seed: Float
     public var quads: [RAVEHoloQuad] = []
+    /// Pinchable regions (see `RAVEHoloTarget`). Invisible on their own: the
+    /// quads above say what the control looks like, a target says where it
+    /// can be selected.
+    public var targets: [RAVEHoloTarget] = []
 
     public init(transform: simd_float4x4, opacity: Float = 1, seed: Float = 0) {
         self.transform = transform

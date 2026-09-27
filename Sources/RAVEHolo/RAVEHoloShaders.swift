@@ -64,6 +64,16 @@ enum RAVEHoloShaders {
         return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - r;
     }
 
+    // Tracking areas: each target writes its area's render value (pad0).
+    fragment uint holoTargetFragment(HoloVaryings in [[stage_in]],
+                                     const device HoloQuadGPU *quads [[buffer(2)]])
+    {
+        const HoloQuadGPU q = quads[in.quad];
+        const float2 half_ = q.rect.zw * 0.5;
+        if (roundedBox(in.inQuad - half_, half_, q.params.x) > 0.0) discard_fragment();
+        return q.pad0;
+    }
+
     fragment float4 holoFragment(HoloVaryings in [[stage_in]],
                                  constant HoloFrame &frame [[buffer(0)]],
                                  const device HoloPanelGPU *panels [[buffer(1)]],
@@ -86,7 +96,9 @@ enum RAVEHoloShaders {
         case 1: {   // frame
             const float d = roundedBox(p, half_, q.params.x);
             coverage = 1.0 - smoothstep(-aa, aa, abs(d + q.params.y * 0.5) - q.params.y * 0.5);
-            glow = (1.0 - smoothstep(0.0, q.params.y * 4.0, abs(d))) * 0.35;
+            // Inside only: the quad is the frame's own rectangle, so glow
+            // past the rounded edge could only show as square corners.
+            glow = (1.0 - smoothstep(0.0, q.params.y * 4.0, abs(d))) * 0.35 * (1.0 - smoothstep(-aa, aa, d));
             break;
         }
         case 2: {   // bar: lit up to the fraction, dim beyond; optional segments

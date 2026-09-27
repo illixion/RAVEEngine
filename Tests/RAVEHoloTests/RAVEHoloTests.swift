@@ -176,7 +176,7 @@ import simd
 
     /// Renders `scene` orthographically over an 8.4 × 4.2 cm window onto
     /// black and returns linear RGBA, row 0 at the top. Nil without Metal 4.
-    private func renderOnBlack(_ scene: RAVEHoloScene, width w: Int = 512) throws -> [Float]? {
+    func renderOnBlack(_ scene: RAVEHoloScene, width w: Int = 512) throws -> [Float]? {
         guard #available(macOS 26.0, *), let device = MTLCreateSystemDefaultDevice(),
               let queue = device.makeMTL4CommandQueue(), let commandBuffer = device.makeCommandBuffer(),
               let allocator = device.makeCommandAllocator() else { return nil }

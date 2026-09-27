@@ -55,7 +55,7 @@ sits behind `RAVEHandInputProvider`, which returns `RAVENoHandInput` off-visionO
 | `RAVEInput` | Hand + controller sensing, pinch/joystick/palm geometry, binding tables, tracked controllers (PSVR2 Sense; Quest Touch over the LAN via Controller Bridge) |
 | `RAVEDiagnostics` | Frame profiler, metric collector, feed gating, HUD views |
 | `RAVERig` | Skeleton geometry, humanoid inference, FABRIK, pose solving, leg stepping — shipping, see README |
-| `RAVEHolo` | In-world holographic UI for Metal hosts: SDF glyph atlas (CoreText, no font shipped), panel/gauge/text scene, Metal 4 renderer drawing into a pass the host owns. Shader source compiles at runtime (SwiftPM's CLI builds no `.metal`); `RAVEHOLO_SNAPSHOT=/x.png swift test --filter RAVEHolo` renders a sample panel to look at. Renderer is `@available(macOS 26)` (Metal 4) without raising the package floor. Consumer: LambdaVision's HEV HUD |
+| `RAVEHolo` | In-world holographic UI for Metal hosts: SDF glyph atlas (CoreText, no font shipped), panel/gauge/text scene, Metal 4 renderer drawing into a pass the host owns. Shader source compiles at runtime (SwiftPM's CLI builds no `.metal`); `RAVEHOLO_SNAPSHOT=/x.png swift test --filter RAVEHolo` renders a sample panel to look at. Renderer is `@available(macOS 26)` (Metal 4) without raising the package floor. Also interactive: pinchable targets (Compositor Services tracking areas + a CPU ray hit-test), widgets/stack layout, and a palm anchor — see "RAVEHolo: interactive panels". Depends on `RAVEInput` for the anchor only. Consumer: LambdaVision's HEV HUD |
 | `RAVEPCVR` | Planned — see "About the planned RAVEPCVR target" below before touching this |
 
 **"XR/game-shaped" is the real scope, not the acronym.** Robot-Assisted Vision Enhancements
@@ -274,6 +274,62 @@ The percentile formula is nearest-rank, clamped to the last index — the one tw
 independently arrived at. It is preserved exactly rather than "corrected" to an
 interpolating percentile, because these numbers have been read on device for months.
 
+## RAVEHolo: interactive panels
+
+Generalised from Oneiros's `WristPanelProbe` (device-verified 2026-09-22) so any Metal /
+Compositor Services host can put pinchable controls on a palm instead of opening a
+static window. RealityKit hosts are out of scope on purpose: a SwiftUI attachment already
+gets hover and pinch routing for free, and a `CompositorLayer` is exactly the host that
+cannot show one.
+
+**The scene is the one source of truth for where a control is.** `RAVEHoloPanel.targets`
+(`target(...)`, or `button(...)`, which draws and registers together) feeds both
+selection paths: Compositor Services **tracking areas** (the system draws gaze hover and
+delivers the pinch with `trackingAreaIdentifier == id`; the app never sees gaze) and
+`RAVEHoloScene.hit(origin:direction:)` (Mac hosts, debug-server presses, a pinch that
+arrived with only a selection ray). Id 0 is reserved.
+
+**Tracking areas are their own single-sample pass** (`RAVEHoloRenderer.encodeTargets`,
+enabled by `Configuration.trackingFormat`). The drawable's tracking texture is
+single-sample integer, so it cannot join an MSAA colour pass (LambdaVision's); a separate
+pass works for every host. With `trackingDepthFormat` set the targets depth-test (`>=`,
+reverse-Z) so a control behind scene geometry is not selectable.
+
+Host checklist (also on `RAVEHoloCompositor`):
+1. `RAVEHoloCompositor.configureTrackingAreas` in the layer configuration (device offers
+   `r8Uint`, same layout as colour).
+2. Per drawable: `registerTargets(of:on:)` → render values, then `encodeTargets` into a
+   pass over `drawable.trackingAreasTextures[0]`, cleared to 0. Tracking areas last one
+   drawable — register every frame the panel is visible.
+3. `onSpatialEvent`: an event whose `trackingAreaIdentifier.rawValue` is a target id goes to
+   the control — **before** any world tap / trigger path — and still reports its phases to
+   `RAVESystemPinchGate` so the raw hand-tracker reading of the same pinch is refused.
+4. `.persistentSystemOverlays(.hidden)` on the `CompositorLayer` **content**. The
+   scene-level modifier alone hid the palm-up Home indicator only the first time; from the
+   second palm-up on it covered the panel (Oneiros, 2026-09-22).
+
+`RAVEHoloPalmAnchor` is the show/place/follow/fade rule (gate + lift along the palm normal +
+upright billboard + snap-then-ease + fade). Its presets differ on purpose: `.overPalm`
+(5 cm, reads as held) and `.offPalm` (Oneiros's 18 cm projection). Pair it with the gate
+metric the product wants — `RAVEPalmFacingGate.panel` for an intentional "look at your
+palm" (LambdaVision's debug panel, which must not appear while that hand drives the
+joystick; use `showAllowed`), `.forgiving` for a game HUD. Advancing it on the render
+thread with a pose predicted for the drawable removes the tick of lag a tick-driven pose
+trails by.
+
+`RAVEHoloInteraction` (lock-guarded, for the isolation rule) records presses on the thread
+that receives them and gives the scene builder a 0…1 flash. `RAVEHoloLayout` is a vertical
+stack (title / row / gauge / sparkline / buttons / spacer) for debug readouts; labels are
+upper-cased because the default atlas is capitals only. Sizes in `RAVEHoloTheme` are for
+35–50 cm: buttons ≥ 2.2 cm tall so gaze lands on them. v1 is discrete controls only — a
+drag/slider needs the pinch's pose over time, which has not been tried.
+`RAVEHOLO_LAYOUT_SNAPSHOT=/x.png swift test --filter rendersADebugLayout` renders a sample
+layout.
+
+**Unverified on device:** everything except what the probe proved (hover, pinch routing, no
+world tap behind the panel). The separate target pass, the anchor tuning and the layout
+sizes are Mac-tested only.
+
 ## How consumers use this
 
 Five apps under `~/Projects/`. During development each references this package as a
@@ -287,7 +343,7 @@ the link list.
 |---|---|
 | `Oneiros` (visionOS + macOS) | `RAVEInput`, `RAVEDiagnostics` (+ SDK's `RAVEConsole`) |
 | `Longwave` (visionOS + iOS + macOS) | `RAVEInput`, `RAVEDiagnostics` (+ SDK's `RAVEUI`, `RAVEConsole`, `RAVEMedia`, `RAVECamera`) |
-| `halflife-visionos/LambdaVision` | `RAVEInput`, `RAVEDiagnostics`, `RAVERig` (+ SDK's `RAVEConsole`) |
+| `halflife-visionos/LambdaVision` | `RAVEInput`, `RAVEDiagnostics`, `RAVERig`, `RAVEHolo` (+ SDK's `RAVEConsole`) |
 | `Hypnos` (visionOS + iOS) | `RAVEDiagnostics` (+ SDK's `RAVENet`, `RAVEUI`, `RAVEConsole`, `RAVEMedia`, `RAVESlideshow`) |
 | `spatial-ai-character` | `RAVEDiagnostics`, and `RAVERig` through its own `CharacterKit` package (+ SDK's `RAVEConsole`) |
 

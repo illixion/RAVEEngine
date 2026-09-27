@@ -37,7 +37,9 @@ let package = Package(
         // so this is how an immersive Metal app gets hand- and object-anchored
         // readouts). Layout and the glyph atlas are CPU-side and host-tested;
         // the renderer compiles its shader source at runtime.
-        .target(name: "RAVEHolo"),
-        .testTarget(name: "RAVEHoloTests", dependencies: ["RAVEHolo"]),
+        // Depends on RAVEInput for the palm anchor alone (gate + palm pose);
+        // the renderer and layout name no input type.
+        .target(name: "RAVEHolo", dependencies: ["RAVEInput"]),
+        .testTarget(name: "RAVEHoloTests", dependencies: ["RAVEHolo", "RAVEInput"]),
     ]
 )

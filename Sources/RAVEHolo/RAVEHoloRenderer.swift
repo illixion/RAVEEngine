@@ -28,14 +28,28 @@ public final class RAVEHoloRenderer {
         public var depthWrite: Bool
         public var maxPanels: Int
         public var maxQuads: Int
+        /// The drawable's tracking-areas texture format (`r8Uint` on device),
+        /// or `.invalid` for a host without tracking areas. When set,
+        /// `encodeTargets` is available.
+        public var trackingFormat: MTLPixelFormat
+        /// Depth attachment of the target pass, `.invalid` for none. With
+        /// one, targets are depth-tested (reverse-Z, `>=`) so a control behind
+        /// scene geometry is not selectable — use the pass's depth after the
+        /// panels were drawn with `depthWrite`, or the scene's own depth.
+        public var trackingDepthFormat: MTLPixelFormat
+        public var maxTargets: Int
 
         public init(colorFormat: MTLPixelFormat, depthFormat: MTLPixelFormat, rasterSampleCount: Int = 1,
                     maxViewCount: Int = 2, slots: Int = 3, depthTest: Bool = true, depthWrite: Bool = false,
-                    maxPanels: Int = 32, maxQuads: Int = 4096) {
+                    maxPanels: Int = 32, maxQuads: Int = 4096,
+                    trackingFormat: MTLPixelFormat = .invalid, trackingDepthFormat: MTLPixelFormat = .invalid,
+                    maxTargets: Int = 64) {
             self.colorFormat = colorFormat; self.depthFormat = depthFormat
             self.rasterSampleCount = rasterSampleCount; self.maxViewCount = maxViewCount
             self.slots = slots; self.depthTest = depthTest; self.depthWrite = depthWrite
             self.maxPanels = maxPanels; self.maxQuads = maxQuads
+            self.trackingFormat = trackingFormat; self.trackingDepthFormat = trackingDepthFormat
+            self.maxTargets = maxTargets
         }
     }
 
@@ -62,6 +76,9 @@ public final class RAVEHoloRenderer {
     private let frameBuffer: MTLBuffer
     private let panelBuffer: MTLBuffer
     private let quadBuffer: MTLBuffer
+    private let targetPipeline: MTLRenderPipelineState?
+    private let targetDepthState: MTLDepthStencilState?
+    private let targetBuffer: MTLBuffer?
 
     private static let frameStride = 256
     private static let panelStride = MemoryLayout<PanelGPU>.stride
@@ -73,6 +90,9 @@ public final class RAVEHoloRenderer {
         let library = try device.makeLibrary(source: RAVEHoloShaders.source, options: nil)
         guard let vertex = library.makeFunction(name: "holoVertex") else { throw Error.function("holoVertex") }
         guard let fragment = library.makeFunction(name: "holoFragment") else { throw Error.function("holoFragment") }
+        guard let targetFragment = library.makeFunction(name: "holoTargetFragment") else {
+            throw Error.function("holoTargetFragment")
+        }
 
         let pd = MTLRenderPipelineDescriptor()
         pd.label = "RAVEHolo"
@@ -119,10 +139,37 @@ public final class RAVEHoloRenderer {
         else { throw Error.buffer }
         f.label = "RAVEHolo.frame"; p.label = "RAVEHolo.panels"; q.label = "RAVEHolo.quads"
         frameBuffer = f; panelBuffer = p; quadBuffer = q
+
+        // Tracking areas: its own single-sample pass writing each target's
+        // render value, so it works whatever the colour pass's sample count
+        // (an integer tracking texture cannot join an MSAA pass).
+        if configuration.trackingFormat != .invalid {
+            let tp = MTLRenderPipelineDescriptor()
+            tp.label = "RAVEHolo.targets"
+            tp.vertexFunction = vertex
+            tp.fragmentFunction = targetFragment
+            tp.colorAttachments[0].pixelFormat = configuration.trackingFormat
+            tp.depthAttachmentPixelFormat = configuration.trackingDepthFormat
+            tp.rasterSampleCount = 1
+            tp.maxVertexAmplificationCount = configuration.maxViewCount
+            targetPipeline = try device.makeRenderPipelineState(descriptor: tp)
+            let td = MTLDepthStencilDescriptor()
+            td.depthCompareFunction = configuration.trackingDepthFormat != .invalid ? .greaterEqual : .always
+            td.isDepthWriteEnabled = false
+            targetDepthState = device.makeDepthStencilState(descriptor: td)
+            guard let t = device.makeBuffer(length: Self.quadStride * configuration.maxTargets * slots,
+                                            options: .storageModeShared) else { throw Error.buffer }
+            t.label = "RAVEHolo.targets"
+            targetBuffer = t
+        } else {
+            targetPipeline = nil; targetDepthState = nil; targetBuffer = nil
+        }
     }
 
     /// Everything the draw touches, for the command buffer's residency set.
-    public var allocations: [MTLAllocation] { [atlas, frameBuffer, panelBuffer, quadBuffer] }
+    public var allocations: [MTLAllocation] {
+        [atlas, frameBuffer, panelBuffer, quadBuffer] + (targetBuffer.map { [$0] } ?? [])
+    }
 
     /// Encode `scene` into a configured encoder. `viewProjections` are
     /// world → clip per view (reverse-Z), indexed by amplification id.
@@ -132,19 +179,13 @@ public final class RAVEHoloRenderer {
         guard !scene.panels.isEmpty, let first = viewProjections.first else { return }
         let slot = slot % configuration.slots
 
-        let frame = (frameBuffer.contents() + slot * Self.frameStride).bindMemory(to: FrameGPU.self, capacity: 1)
-        frame.pointee = FrameGPU(viewProjection: (first, viewProjections.count > 1 ? viewProjections[1] : first),
-                                 params: SIMD4(time, style.scanlinePitch, style.scanlineDepth, style.flickerDepth))
-
+        writeFrame(scene, viewProjections: viewProjections, first: first, slot: slot, time: time)
         let panelBase = slot * configuration.maxPanels
         let quadBase = slot * configuration.maxQuads
-        let panels = (panelBuffer.contents() + panelBase * Self.panelStride)
-            .bindMemory(to: PanelGPU.self, capacity: configuration.maxPanels)
         let quads = (quadBuffer.contents() + quadBase * Self.quadStride)
             .bindMemory(to: QuadGPU.self, capacity: configuration.maxQuads)
         var quadCount = 0
         for (pi, panel) in scene.panels.prefix(configuration.maxPanels).enumerated() {
-            panels[pi] = PanelGPU(model: panel.transform, params: SIMD4(panel.opacity, panel.seed, max(0, panel.brightness), 0))
             for q in panel.quads {
                 guard quadCount < configuration.maxQuads else { break }
                 quads[quadCount] = QuadGPU(rect: q.rect, params: q.params, color: q.color,
@@ -165,6 +206,63 @@ public final class RAVEHoloRenderer {
         arguments.setTexture(atlas.gpuResourceID, index: 0)
         encoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: quadCount)
         encoder.popDebugGroup()
+    }
+
+    /// Encode the scene's targets into a pass whose colour attachment 0 is
+    /// the drawable's tracking-areas texture (cleared to 0), same layout,
+    /// viewports, rate map and amplification as the colour pass.
+    /// `renderValues` maps a target id to the render value its tracking area
+    /// was given this frame (`RAVEHoloCompositor.registerTargets`); targets
+    /// without one are skipped. Returns how many were drawn. Call after, or
+    /// instead of, `encode` for the same scene and slot.
+    @discardableResult
+    public func encodeTargets(_ scene: RAVEHoloScene, renderValues: [UInt64: UInt32],
+                              encoder: MTL4RenderCommandEncoder,
+                              viewProjections: [simd_float4x4], slot: Int) -> Int {
+        guard let targetPipeline, let targetDepthState, let targetBuffer,
+              let first = viewProjections.first, !renderValues.isEmpty else { return 0 }
+        let slot = slot % configuration.slots
+        writeFrame(scene, viewProjections: viewProjections, first: first, slot: slot, time: nil)
+        let base = slot * configuration.maxTargets
+        let out = (targetBuffer.contents() + base * Self.quadStride)
+            .bindMemory(to: QuadGPU.self, capacity: configuration.maxTargets)
+        var count = 0
+        for (pi, panel) in scene.panels.prefix(configuration.maxPanels).enumerated() where panel.opacity > 0.01 {
+            for t in panel.targets {
+                guard count < configuration.maxTargets, let value = renderValues[t.id], value != 0 else { continue }
+                out[count] = QuadGPU(rect: t.rect, params: SIMD4(t.corner, 0, 0, 0), color: .zero,
+                                     panel: UInt32(pi), kind: 0, pad0: value, pad1: 0)
+                count += 1
+            }
+        }
+        guard count > 0 else { return 0 }
+        encoder.pushDebugGroup("RAVEHolo.targets")
+        encoder.setRenderPipelineState(targetPipeline)
+        encoder.setDepthStencilState(targetDepthState)
+        encoder.setCullMode(.none)
+        encoder.setArgumentTable(arguments, stages: [.vertex, .fragment])
+        arguments.setAddress(frameBuffer.gpuAddress + UInt64(slot * Self.frameStride), index: 0)
+        arguments.setAddress(panelBuffer.gpuAddress + UInt64(slot * configuration.maxPanels * Self.panelStride), index: 1)
+        arguments.setAddress(targetBuffer.gpuAddress + UInt64(base * Self.quadStride), index: 2)
+        encoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: count)
+        encoder.popDebugGroup()
+        return count
+    }
+
+    /// Per-frame and per-panel data both passes read. Writing it twice for
+    /// one slot writes the same bytes; `time: nil` (the target pass, which
+    /// does not animate) keeps the colour pass's.
+    private func writeFrame(_ scene: RAVEHoloScene, viewProjections: [simd_float4x4], first: simd_float4x4,
+                            slot: Int, time: Float?) {
+        let frame = (frameBuffer.contents() + slot * Self.frameStride).bindMemory(to: FrameGPU.self, capacity: 1)
+        let time = time ?? frame.pointee.params.x
+        frame.pointee = FrameGPU(viewProjection: (first, viewProjections.count > 1 ? viewProjections[1] : first),
+                                 params: SIMD4(time, style.scanlinePitch, style.scanlineDepth, style.flickerDepth))
+        let panels = (panelBuffer.contents() + slot * configuration.maxPanels * Self.panelStride)
+            .bindMemory(to: PanelGPU.self, capacity: configuration.maxPanels)
+        for (pi, panel) in scene.panels.prefix(configuration.maxPanels).enumerated() {
+            panels[pi] = PanelGPU(model: panel.transform, params: SIMD4(panel.opacity, panel.seed, max(0, panel.brightness), 0))
+        }
     }
 
     // Mirrors HoloFrame / HoloPanelGPU / HoloQuadGPU in the shader source.
