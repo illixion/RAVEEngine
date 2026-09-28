@@ -43,8 +43,14 @@ public final class RAVEPanel {
     public var widthRange: ClosedRange<Float> = 0.05...6
     public var heightRange: ClosedRange<Float> = 0.05...4
     /// When true, `size.y` follows the content's laid-out aspect, for a
-    /// panel whose content decides its own height (a HUD, a chat column).
+    /// panel whose content decides its own height (a chat column).
     public var fitHeightToContent = false
+    /// When set, the content keeps this scale (points→metres as RealityKit
+    /// lays attachments out) and `size` follows the content instead: for a
+    /// HUD designed in points, not a screen sized in metres.
+    public var contentScale: Float? {
+        didSet { layout() }
+    }
 
     /// Whether anyone can see the panel; advanced by `tick`.
     public var visibility = RAVEPanelVisibility()
@@ -174,7 +180,10 @@ public final class RAVEPanel {
     private func layout() {
         let natural = naturalSize
         laidOutNaturalSize = natural
-        if natural.x > 0 {
+        if let contentScale {
+            content.scale = SIMD3(repeating: contentScale)
+            if natural.x > 0 { size = natural * contentScale }
+        } else if natural.x > 0 {
             content.scale = SIMD3(repeating: size.x / natural.x)
             if fitHeightToContent, natural.y > 0 {
                 size.y = min(max(size.x * natural.y / natural.x, heightRange.lowerBound), heightRange.upperBound)

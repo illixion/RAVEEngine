@@ -56,7 +56,7 @@ sits behind `RAVEHandInputProvider`, which returns `RAVENoHandInput` off-visionO
 | `RAVEDiagnostics` | Frame profiler, metric collector, feed gating, HUD views |
 | `RAVERig` | Skeleton geometry, humanoid inference, FABRIK, pose solving, leg stepping — shipping, see README |
 | `RAVEHolo` | In-world holographic UI for Metal hosts: SDF glyph atlas (CoreText, no font shipped), panel/gauge/text scene, Metal 4 renderer drawing into a pass the host owns. Shader source compiles at runtime (SwiftPM's CLI builds no `.metal`); `RAVEHOLO_SNAPSHOT=/x.png swift test --filter RAVEHolo` renders a sample panel to look at. Renderer is `@available(macOS 26)` (Metal 4) without raising the package floor. Also interactive: pinchable targets (Compositor Services tracking areas + a CPU ray hit-test), widgets/stack layout, and a palm anchor (`RAVEHoloPalmAnchor`, an alias of RAVEInput's `RAVEPalmAnchor`, shared with `RAVEPanel`) — see "RAVEHolo: interactive panels". Depends on `RAVEInput` for the anchor only. Consumers: LambdaVision (HEV HUD + developer palm debug panel), Oneiros (Metal-host wrist HUD) |
-| `RAVEPanel` | Any SwiftUI view as a panel in a RealityKit scene: chrome, the attachment hosting fix, world / palm / head-follow placing, and a visibility verdict to pause content by. Rules host-tested, entity half visionOS-only. Depends on `RAVEInput` for the palm anchor. See "About `RAVEPanel`". Consumers: spatial-ai-character |
+| `RAVEPanel` | Any SwiftUI view as a panel in a RealityKit scene: chrome, the attachment hosting fix, world / palm / head-follow placing, and a visibility verdict to pause content by. Rules host-tested, entity half visionOS-only. Depends on `RAVEInput` for the palm anchor. See "About `RAVEPanel`". Consumers: spatial-ai-character, Longwave |
 | `RAVEPCVR` | Planned — see "About the planned RAVEPCVR target" below before touching this |
 
 **"XR/game-shaped" is the real scope, not the acronym.** Robot-Assisted Vision Enhancements
@@ -135,9 +135,14 @@ moves it. Re-setting the same transform in a later frame is enough. A SwiftUI up
 `RealityView` is not. `RAVEPanel` re-sets it each frame after a show until `isHosted`
 (the app's probe, such as "the web view has a window") says so, or for 90 frames without one.
 
+Sizing is a width in metres (a screen) or, with `contentScale`, a fixed points→metres scale
+with the size following the content (a HUD designed in points).
+
 Consumers: spatial-ai-character (`ScreenPanel`, the character's web screen; its
 `scripts/sim-scenarios.py` checks placing, drags, tablet and pausing through it in the
-simulator).
+simulator) and Longwave (the PCVR space's wrist HUD over the palm and its head-following
+trial/bandwidth banner, `FoveatedImmersiveView.swift`; device-only, since the simulator has
+no hand tracking). Longwave's planned hand-pinned web panels come next.
 
 Build it when the Longwave overlay starts, not before, and move Longwave's own RealityKit
 palm HUD (`WristHUDDriver` in `FoveatedImmersiveView.swift`) onto it in the same change, so
