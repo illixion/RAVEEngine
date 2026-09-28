@@ -19,6 +19,7 @@ let package = Package(
         .library(name: "RAVEDiagnostics", targets: ["RAVEDiagnostics"]),
         .library(name: "RAVERig", targets: ["RAVERig"]),
         .library(name: "RAVEHolo", targets: ["RAVEHolo"]),
+        .library(name: "RAVEPanel", targets: ["RAVEPanel"]),
     ],
     targets: [
         .target(name: "RAVEInput"),
@@ -37,9 +38,21 @@ let package = Package(
         // so this is how an immersive Metal app gets hand- and object-anchored
         // readouts). Layout and the glyph atlas are CPU-side and host-tested;
         // the renderer compiles its shader source at runtime.
-        // Depends on RAVEInput for the palm anchor alone (gate + palm pose);
-        // the renderer and layout name no input type.
+        // Depends on RAVEInput for the palm anchor alone (`RAVEPalmAnchor`,
+        // re-exported under its old name); the renderer and layout name no
+        // input type.
         .target(name: "RAVEHolo", dependencies: ["RAVEInput"]),
         .testTarget(name: "RAVEHoloTests", dependencies: ["RAVEHolo", "RAVEInput"]),
+        // Any SwiftUI view as a panel in a RealityKit scene: its chrome, the
+        // attachment hosting fix, placing it in the world, over a palm or
+        // ahead of the viewer, and whether anyone can see it. The RealityKit
+        // counterpart of RAVEHolo, sharing its palm anchor (so the
+        // placement maths exists once for Metal and RealityKit hosts). It
+        // lives in RAVEInput, not RAVEHolo: RAVEHolo's Metal 4 renderer does
+        // not build for the visionOS simulator. The
+        // rules are framework-free and host-tested; the entity half is
+        // visionOS-only. Content-agnostic: never imports RAVESDK.
+        .target(name: "RAVEPanel", dependencies: ["RAVEInput"]),
+        .testTarget(name: "RAVEPanelTests", dependencies: ["RAVEPanel"]),
     ]
 )

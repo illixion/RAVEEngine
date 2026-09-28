@@ -55,7 +55,8 @@ sits behind `RAVEHandInputProvider`, which returns `RAVENoHandInput` off-visionO
 | `RAVEInput` | Hand + controller sensing, pinch/joystick/palm geometry, binding tables, tracked controllers (PSVR2 Sense; Quest Touch over the LAN via Controller Bridge) |
 | `RAVEDiagnostics` | Frame profiler, metric collector, feed gating, HUD views |
 | `RAVERig` | Skeleton geometry, humanoid inference, FABRIK, pose solving, leg stepping — shipping, see README |
-| `RAVEHolo` | In-world holographic UI for Metal hosts: SDF glyph atlas (CoreText, no font shipped), panel/gauge/text scene, Metal 4 renderer drawing into a pass the host owns. Shader source compiles at runtime (SwiftPM's CLI builds no `.metal`); `RAVEHOLO_SNAPSHOT=/x.png swift test --filter RAVEHolo` renders a sample panel to look at. Renderer is `@available(macOS 26)` (Metal 4) without raising the package floor. Also interactive: pinchable targets (Compositor Services tracking areas + a CPU ray hit-test), widgets/stack layout, and a palm anchor — see "RAVEHolo: interactive panels". Depends on `RAVEInput` for the anchor only. Consumers: LambdaVision (HEV HUD + developer palm debug panel), Oneiros (Metal-host wrist HUD) |
+| `RAVEHolo` | In-world holographic UI for Metal hosts: SDF glyph atlas (CoreText, no font shipped), panel/gauge/text scene, Metal 4 renderer drawing into a pass the host owns. Shader source compiles at runtime (SwiftPM's CLI builds no `.metal`); `RAVEHOLO_SNAPSHOT=/x.png swift test --filter RAVEHolo` renders a sample panel to look at. Renderer is `@available(macOS 26)` (Metal 4) without raising the package floor. Also interactive: pinchable targets (Compositor Services tracking areas + a CPU ray hit-test), widgets/stack layout, and a palm anchor (`RAVEHoloPalmAnchor`, an alias of RAVEInput's `RAVEPalmAnchor`, shared with `RAVEPanel`) — see "RAVEHolo: interactive panels". Depends on `RAVEInput` for the anchor only. Consumers: LambdaVision (HEV HUD + developer palm debug panel), Oneiros (Metal-host wrist HUD) |
+| `RAVEPanel` | Any SwiftUI view as a panel in a RealityKit scene: chrome, the attachment hosting fix, world / palm / head-follow placing, and a visibility verdict to pause content by. Rules host-tested, entity half visionOS-only. Depends on `RAVEInput` for the palm anchor. See "About `RAVEPanel`". Consumers: spatial-ai-character |
 | `RAVEPCVR` | Planned — see "About the planned RAVEPCVR target" below before touching this |
 
 **"XR/game-shaped" is the real scope, not the acronym.** Robot-Assisted Vision Enhancements
@@ -94,35 +95,49 @@ and the calibration it needs are sensing, polled through the same
 `RAVEInput` gets them with no new product to add. Only if the AVP → PC protocol is ever
 shared does `RAVEPCVR` get built; the Quest pieces stay here either way.
 
-### About the planned `RAVEPanel` target
+### About `RAVEPanel`
 
-Decided 2026-09-28, not built yet. It is **a RealityKit panel that shows any SwiftUI view in
-the room**, with its chrome and its anchoring. It comes from spatial-ai-character's
-`ScreenPanel`, whose generic half is exactly what Longwave's planned hand-pinned web windows
-need:
+Built 2026-09-28. It is **a RealityKit panel that shows any SwiftUI view in the room**, with
+its chrome and its placing. It came out of spatial-ai-character's `ScreenPanel`, and it has
+what Longwave's hand-pinned web windows and palm HUD need too:
 
-- the attachment and its hosting fix;
-- grab bar, resize corner and close button, with drag gain by distance, turning to face the
-  user, and physical scaling;
-- **anchors**, all with the same spring smoothing: *world* (a screen on a wall), *follow an
-  entity* (the character carrying it like a tablet), and *palm/wrist* (Longwave's chat, shown
-  when the wrist turns up);
-- **a visibility verdict**: in the scene, enabled, within the user's view (device pose
-  against the panel, with hysteresis) and, for palm anchors, the palm facing the user. The
-  app turns that into a pause of whatever the panel holds.
+- `RAVEPanel` (visionOS only): the attachment and its hosting fix; grab bar, resize corner
+  and close button; drags with gain by distance, turning to face the viewer; the content
+  scaled to a width in metres; fading through `OpacityComponent` (disabled at 0).
+- **Placing:** `move(to:facing:)` for the world, `follow(_ anchor: RAVEPalmAnchor)` over a
+  palm, and `follow(_:)` with a `RAVEPanelHeadFollow` pose for a panel that floats ahead of
+  the viewer and trails their turns (Longwave's banner). *Follow an entity* (the character
+  carrying it like a tablet) is not built; it waits for the character's holding animation.
+- **Visibility verdict**, `RAVEPanelVisibility`: available (in the scene, enabled, space in
+  the foreground), within a 60° cone of the gaze counting the panel's size, and a 1.5 s delay
+  before an unseen panel stops running. Becoming unavailable stops it at once, and being
+  seen again resumes it at once. `keepAwake(until:)` holds it running for a tool reading an
+  unseen page. The app turns `isRunning` into a pause of whatever the panel holds.
 
-Why here, not in RAVESDK: it is XR-shaped (entities, input bindings, anchoring), and the palm
-anchor needs `RAVEInput`, whose palm pose `RAVEHolo`'s palm anchor already uses. It is
+The rules (`RAVEPanelRules.swift`: viewer, visibility, head follow, orientation, drag gain)
+are framework-free and host-tested; `RAVEPanel.swift` is visionOS-only.
+
+Why here, not in RAVESDK: it is XR-shaped (entities, input bindings, anchoring). It is
 **content-agnostic** and must not import RAVESDK's `RAVEBrowser`. The app puts a browser view
 into the panel, and a Mac-streamed window can go into the same panel later. It is the
 RealityKit-host counterpart of `RAVEHolo`, which draws panels for Metal hosts.
 
-**The hosting fix it must carry** (measured on the AVP, 2026-09-28): a
+**The palm anchor is shared with RAVEHolo, and lives in RAVEInput** as `RAVEPalmAnchor`,
+aliased in RAVEHolo as `RAVEHoloPalmAnchor` so Oneiros and LambdaVision did not change. It
+moved there because RAVEHolo's Metal 4 renderer does not build for the visionOS simulator.
+A RealityKit app linking RAVEHolo just for the anchor would lose its simulator build.
+
+**The hosting fix it carries** (measured on the AVP, 2026-09-28): a
 `ViewAttachmentComponent` added from outside SwiftUI is put into a window only when the
 entity's transform changes after it is already in the scene. Placing it in the same turn as
 the add leaves a `UIViewRepresentable` inside at 0×0 with no window: blank, until something
 moves it. Re-setting the same transform in a later frame is enough. A SwiftUI update of the
-`RealityView` is not.
+`RealityView` is not. `RAVEPanel` re-sets it each frame after a show until `isHosted`
+(the app's probe, such as "the web view has a window") says so, or for 90 frames without one.
+
+Consumers: spatial-ai-character (`ScreenPanel`, the character's web screen; its
+`scripts/sim-scenarios.py` checks placing, drags, tablet and pausing through it in the
+simulator).
 
 Build it when the Longwave overlay starts, not before, and move Longwave's own RealityKit
 palm HUD (`WristHUDDriver` in `FoveatedImmersiveView.swift`) onto it in the same change, so
