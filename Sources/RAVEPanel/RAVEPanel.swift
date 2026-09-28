@@ -217,6 +217,19 @@ public final class RAVEPanel {
         root.setTransformMatrix(transform, relativeTo: nil)
     }
 
+    /// Worn on the wrist, or pinned to the view: the pose and fade from the
+    /// mount (a head lock has no fade of its own; set `opacity`).
+    public func follow(_ mount: RAVEPanelHandMount, pose: (position: SIMD3<Float>, orientation: simd_quatf)?) {
+        opacity = mount.opacity
+        guard let pose, mount.opacity > 0 else { return }
+        setPose(position: pose.position, orientation: pose.orientation)
+    }
+
+    /// Whether the chrome shows (and takes input): for an edit mode.
+    public var showsChrome: Bool = true {
+        didSet { for handle in handles.values { handle.isEnabled = showsChrome } }
+    }
+
     /// Ahead of the viewer: the pose the follow worked out, if it has one.
     public func follow(_ pose: (position: SIMD3<Float>, orientation: simd_quatf)?) {
         guard let pose else { return }
@@ -259,6 +272,11 @@ public final class RAVEPanel {
         entity.components.set(InputTargetComponent())
         entity.components.set(HoverEffectComponent())
         return entity
+    }
+}
+extension RAVEPanelPalm {
+    public init(_ pose: RAVEPalmPose) {
+        self.init(position: pose.position, normalOut: pose.palmNormalOut, fingers: pose.fingersDirection)
     }
 }
 #endif

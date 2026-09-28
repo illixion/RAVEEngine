@@ -180,3 +180,193 @@ public enum RAVEPanelDrag {
         min(max(distance / 0.5, 1), 4)
     }
 }
+
+/// A panel worn on the back of the wrist, like a watch face that floats: an
+/// offset in the hand's own frame, so it rides the forearm wherever the arm
+/// goes, turned to the viewer with its long edge along the arm. It fades out
+/// while the palm faces the viewer, since the back of the wrist (and the
+/// panel) then faces away, and turning the palm up is a palm HUD's gesture.
+/// Tracking loss fades it where it was.
+///
+/// OVR Toolkit's wrist windows are the model: always there, readable at a
+/// glance, never summoned.
+public struct RAVEPanelHandMount: Sendable, Equatable {
+    /// Metres in the hand frame: x across the hand (thumb side of a right
+    /// hand), y out of the back of the hand, z along the fingers (negative is
+    /// back toward the forearm).
+    public var offset: SIMD3<Float>
+    /// Time constant of the follow (s).
+    public var smoothing: TimeInterval
+    public var fadeIn: TimeInterval
+    public var fadeOut: TimeInterval
+    /// Palm facing (`RAVEPalmGeometry.facing`'s dot product) at or above
+    /// which the panel hides: the palm is turned toward the viewer.
+    public var hideWhenPalmFacing: Float
+
+    public private(set) var opacity: Float = 0
+    public private(set) var position: SIMD3<Float>?
+    public private(set) var orientation = simd_quatf(angle: 0, axis: [0, 1, 0])
+
+    /// Just past the wrist on the forearm, a few centimetres above it.
+    public static let backOfWrist = SIMD3<Float>(0, 0.05, -0.13)
+
+    public init(offset: SIMD3<Float> = RAVEPanelHandMount.backOfWrist, smoothing: TimeInterval = 0.06,
+                fadeIn: TimeInterval = 0.15, fadeOut: TimeInterval = 0.2, hideWhenPalmFacing: Float = 0.35) {
+        self.offset = offset
+        self.smoothing = smoothing
+        self.fadeIn = fadeIn
+        self.fadeOut = fadeOut
+        self.hideWhenPalmFacing = hideWhenPalmFacing
+    }
+
+    /// The hand frame: across, out of the back, along the fingers. Nil for a
+    /// degenerate pose.
+    public static func frame(of palm: RAVEPanelPalm) -> (across: SIMD3<Float>, back: SIMD3<Float>, along: SIMD3<Float>)? {
+        let back = -palm.normalOut
+        var along = palm.fingers - simd_dot(palm.fingers, back) * back
+        guard simd_length(along) > 1e-4, simd_length(back) > 1e-4 else { return nil }
+        along = simd_normalize(along)
+        let across = simd_normalize(simd_cross(back, along))
+        return (across, simd_normalize(back), along)
+    }
+
+    /// Where `offset` puts the panel for this palm.
+    public func target(for palm: RAVEPanelPalm) -> SIMD3<Float>? {
+        guard let f = Self.frame(of: palm) else { return nil }
+        return palm.position + f.across * offset.x + f.back * offset.y + f.along * offset.z
+    }
+
+    /// The offset that would put the panel at `world` for this palm: for
+    /// moving it by hand in an edit mode.
+    public static func offset(placing world: SIMD3<Float>, on palm: RAVEPanelPalm) -> SIMD3<Float>? {
+        guard let f = frame(of: palm) else { return nil }
+        let d = world - palm.position
+        return SIMD3(simd_dot(d, f.across), simd_dot(d, f.back), simd_dot(d, f.along))
+    }
+
+    /// One frame. `palm` nil when the hand is not tracked, `viewer` the eye
+    /// point. Returns the pose to show at, or nil while it has none.
+    public mutating func update(palm: RAVEPanelPalm?, viewer: SIMD3<Float>?, deltaTime: TimeInterval)
+        -> (position: SIMD3<Float>, orientation: simd_quatf)? {
+        var shown = false
+        if let palm, let viewer, let target = target(for: palm), let f = Self.frame(of: palm) {
+            let toViewer = viewer - palm.position
+            let facing = simd_length(toViewer) > 1e-4 ? simd_dot(palm.normalOut, simd_normalize(toViewer)) : 0
+            shown = facing < hideWhenPalmFacing
+            let facingViewer = Self.alongArm(at: target, arm: f.along, viewer: viewer)
+            if let current = position, opacity > 0, smoothing > 0 {
+                let k = Float(1 - exp(-deltaTime / smoothing))
+                position = current + (target - current) * k
+                orientation = simd_slerp(orientation, facingViewer, k)
+            } else {
+                // Appear in place rather than swooping in from a stale pose.
+                position = target
+                orientation = facingViewer
+            }
+        }
+        if shown {
+            opacity = fadeIn > 0 ? min(1, opacity + Float(deltaTime / fadeIn)) : 1
+            if opacity == 0 { opacity = .ulpOfOne }
+        } else {
+            opacity = fadeOut > 0 ? max(0, opacity - Float(deltaTime / fadeOut)) : 0
+        }
+        return position.map { ($0, orientation) }
+    }
+
+    public mutating func reset() {
+        opacity = 0
+        position = nil
+    }
+
+    /// +Z toward the viewer, the long (x) edge along the arm as the viewer
+    /// sees it, kept the right way up. With the arm pointing at or away from
+    /// the viewer there is no "along" to see, so it stands upright instead.
+    static func alongArm(at position: SIMD3<Float>, arm: SIMD3<Float>, viewer: SIMD3<Float>) -> simd_quatf {
+        var z = viewer - position
+        guard simd_length(z) > 1e-5 else { return RAVEPanelOrientation.facing(from: position, toward: viewer) }
+        z = simd_normalize(z)
+        var x = arm - simd_dot(arm, z) * z
+        guard simd_length(x) > 0.3 else { return RAVEPanelOrientation.facing(from: position, toward: viewer) }
+        x = simd_normalize(x)
+        var y = simd_cross(z, x)
+        // Text upside down on the other arm: flip so up is up.
+        if y.y < 0 { x = -x; y = -y }
+        return simd_quatf(simd_float3x3(x, y, z))
+    }
+}
+
+/// A palm for the hand mount: RAVEInput's `RAVEPalmPose` without making the
+/// rules depend on it (`init(_:)` in `RAVEPanel.swift` converts).
+public struct RAVEPanelPalm: Sendable, Equatable {
+    public var position: SIMD3<Float>
+    /// Out of the palm, toward the face when looking at it.
+    public var normalOut: SIMD3<Float>
+    /// Up the hand, toward the fingertips.
+    public var fingers: SIMD3<Float>
+
+    public init(position: SIMD3<Float>, normalOut: SIMD3<Float>, fingers: SIMD3<Float>) {
+        self.position = position
+        self.normalOut = normalOut
+        self.fingers = fingers
+    }
+}
+
+/// A panel pinned to the view: a fixed offset in the head's frame, so it
+/// stays in the same spot of the field of view (OVR Toolkit's "attach to
+/// head"). A light follow takes the jitter out of head tracking without it
+/// feeling like it lags.
+public struct RAVEPanelHeadLock: Sendable, Equatable {
+    /// Metres in the head frame: x right, y up, z backward (so ahead is -z).
+    public var offset: SIMD3<Float>
+    public var smoothing: TimeInterval
+
+    public private(set) var position: SIMD3<Float>?
+    public private(set) var orientation = simd_quatf(angle: 0, axis: [0, 1, 0])
+
+    /// Low and to the right, out of the centre of view.
+    public static let lowerRight = SIMD3<Float>(0.28, -0.18, -0.9)
+
+    public init(offset: SIMD3<Float> = RAVEPanelHeadLock.lowerRight, smoothing: TimeInterval = 0.04) {
+        self.offset = offset
+        self.smoothing = smoothing
+    }
+
+    public mutating func update(head: simd_float4x4?, deltaTime: TimeInterval)
+        -> (position: SIMD3<Float>, orientation: simd_quatf)? {
+        if let head {
+            let target4 = head * SIMD4(offset, 1)
+            let target = SIMD3(target4.x, target4.y, target4.z)
+            // Facing the eye rather than parallel to the face, so a panel
+            // off to the side is not seen edge-on.
+            let eye = SIMD3(head.columns.3.x, head.columns.3.y, head.columns.3.z)
+            let up = simd_normalize(SIMD3(head.columns.1.x, head.columns.1.y, head.columns.1.z))
+            let facing = Self.facing(from: target, toward: eye, up: up)
+            if let current = position, smoothing > 0 {
+                let k = Float(1 - exp(-deltaTime / smoothing))
+                position = current + (target - current) * k
+                orientation = simd_slerp(orientation, facing, k)
+            } else {
+                position = target
+                orientation = facing
+            }
+        }
+        return position.map { ($0, orientation) }
+    }
+
+    /// The offset that would put the panel at `world` for this head.
+    public static func offset(placing world: SIMD3<Float>, head: simd_float4x4) -> SIMD3<Float> {
+        let local = head.inverse * SIMD4(world, 1)
+        return SIMD3(local.x, local.y, local.z)
+    }
+
+    public mutating func reset() { position = nil }
+
+    static func facing(from position: SIMD3<Float>, toward eye: SIMD3<Float>, up: SIMD3<Float>) -> simd_quatf {
+        var z = eye - position
+        z = simd_length(z) > 1e-5 ? simd_normalize(z) : SIMD3(0, 0, 1)
+        var x = simd_cross(up, z)
+        guard simd_length(x) > 1e-4 else { return RAVEPanelOrientation.facing(from: position, toward: eye) }
+        x = simd_normalize(x)
+        return simd_quatf(simd_float3x3(x, simd_cross(z, x), z))
+    }
+}

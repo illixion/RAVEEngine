@@ -104,9 +104,14 @@ what Longwave's hand-pinned web windows and palm HUD need too:
 - `RAVEPanel` (visionOS only): the attachment and its hosting fix; grab bar, resize corner
   and close button; drags with gain by distance, turning to face the viewer; the content
   scaled to a width in metres; fading through `OpacityComponent` (disabled at 0).
-- **Placing:** `move(to:facing:)` for the world, `follow(_ anchor: RAVEPalmAnchor)` over a
-  palm, and `follow(_:)` with a `RAVEPanelHeadFollow` pose for a panel that floats ahead of
-  the viewer and trails their turns (Longwave's banner). *Follow an entity* (the character
+- **Placing:** `move(to:facing:)` for the world; `follow(_ anchor: RAVEPalmAnchor)` over a
+  palm (summoned by turning it up); `RAVEPanelHeadFollow` for a panel that floats ahead of the
+  viewer and trails their turns (Longwave's banner); `RAVEPanelHandMount` for a panel worn on
+  the back of the wrist, always there, long edge along the arm, fading while that palm faces
+  the viewer; and `RAVEPanelHeadLock` for one pinned to a spot in the view (OVR Toolkit's
+  "attach to head"). The mount and the lock both give the inverse (`offset(placing:…)`), so a
+  panel dragged by hand keeps its new place relative to its wrist or the view. `showsChrome`
+  hides the handles outside an edit mode. *Follow an entity* (the character
   carrying it like a tablet) is not built; it waits for the character's holding animation.
 - **Visibility verdict**, `RAVEPanelVisibility`: available (in the scene, enabled, space in
   the foreground), within a 60° cone of the gaze counting the panel's size, and a 1.5 s delay
@@ -141,8 +146,8 @@ with the size following the content (a HUD designed in points).
 Consumers: spatial-ai-character (`ScreenPanel`, the character's web screen; its
 `scripts/sim-scenarios.py` checks placing, drags, tablet and pausing through it in the
 simulator) and Longwave (the PCVR space's wrist HUD over the palm and its head-following
-trial/bandwidth banner, `FoveatedImmersiveView.swift`; device-only, since the simulator has
-no hand tracking). Longwave's planned hand-pinned web panels come next.
+trial/bandwidth banner, `FoveatedImmersiveView.swift`, and the pinned web panels,
+`PCVRWebPanelsDriver.swift`; device-only, since the simulator has no hand tracking).
 
 Build it when the Longwave overlay starts, not before, and move Longwave's own RealityKit
 palm HUD (`WristHUDDriver` in `FoveatedImmersiveView.swift`) onto it in the same change, so

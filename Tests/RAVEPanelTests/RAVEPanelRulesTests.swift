@@ -105,3 +105,73 @@ import simd
         #expect(RAVEPanelDrag.gain(distance: 10) == 4)
     }
 }
+
+/// The wrist mount and the view lock (Longwave's pinned web panels).
+@Suite struct RAVEPanelMountTests {
+    /// A left forearm held across the body in front of the chest, back of the
+    /// hand up, fingers pointing right: the pose in OVR Toolkit's pictures.
+    let palm = RAVEPanelPalm(position: [0, 1.2, -0.4], normalOut: [0, -1, 0], fingers: [1, 0, 0])
+    let eye = SIMD3<Float>(0, 1.6, 0)
+
+    @Test func backOfWristSitsAboveTheForearm() {
+        let mount = RAVEPanelHandMount()
+        let target = mount.target(for: palm)!
+        // 5 cm above the back of the hand, 13 cm back toward the elbow.
+        #expect(simd_distance(target, [-0.13, 1.25, -0.4]) < 1e-5)
+    }
+
+    @Test func offsetRoundTrips() {
+        let world = SIMD3<Float>(-0.2, 1.3, -0.35)
+        let offset = RAVEPanelHandMount.offset(placing: world, on: palm)!
+        var mount = RAVEPanelHandMount(offset: offset)
+        #expect(simd_distance(mount.target(for: palm)!, world) < 1e-5)
+        _ = mount.update(palm: palm, viewer: eye, deltaTime: 0.1)
+        #expect(simd_distance(mount.position!, world) < 1e-5)
+    }
+
+    @Test func facesTheViewerWithItsLongEdgeAlongTheArmUpright() {
+        var mount = RAVEPanelHandMount()
+        let pose = mount.update(palm: palm, viewer: eye, deltaTime: 0.1)!
+        let z = pose.orientation.act([0, 0, 1]), x = pose.orientation.act([1, 0, 0]), y = pose.orientation.act([0, 1, 0])
+        #expect(simd_dot(z, simd_normalize(eye - pose.position)) > 0.999)
+        #expect(abs(x.x) > 0.95)          // along the arm, as the viewer sees it
+        #expect(y.y > 0)                  // right way up
+        // The right arm points the other way: still upright.
+        let right = RAVEPanelPalm(position: [0, 1.2, -0.4], normalOut: [0, -1, 0], fingers: [-1, 0, 0])
+        var other = RAVEPanelHandMount()
+        let flipped = other.update(palm: right, viewer: eye, deltaTime: 0.1)!
+        #expect(flipped.orientation.act([0, 1, 0]).y > 0)
+    }
+
+    @Test func hidesWhileThePalmFacesTheViewerAndOnTrackingLoss() {
+        var mount = RAVEPanelHandMount(fadeIn: 0.1, fadeOut: 0.1)
+        _ = mount.update(palm: palm, viewer: eye, deltaTime: 0.2)
+        #expect(mount.opacity == 1)
+        let up = RAVEPanelPalm(position: palm.position, normalOut: simd_normalize(eye - palm.position), fingers: [1, 0, 0])
+        _ = mount.update(palm: up, viewer: eye, deltaTime: 0.2)
+        #expect(mount.opacity == 0)
+        _ = mount.update(palm: palm, viewer: eye, deltaTime: 0.2)
+        #expect(mount.opacity == 1)
+        let stay = mount.position
+        _ = mount.update(palm: nil, viewer: eye, deltaTime: 0.2)
+        #expect(mount.opacity == 0)
+        #expect(mount.position == stay)   // faded where it was
+    }
+
+    @Test func headLockHoldsItsPlaceInTheView() {
+        var lock = RAVEPanelHeadLock(offset: [0.3, -0.2, -0.9], smoothing: 0)
+        var head = matrix_identity_float4x4
+        head.columns.3 = [0, 1.6, 0, 1]
+        let a = lock.update(head: head, deltaTime: 0.01)!
+        #expect(simd_distance(a.position, [0.3, 1.4, -0.9]) < 1e-5)
+        #expect(simd_dot(a.orientation.act([0, 0, 1]), simd_normalize(SIMD3(0, 1.6, 0) - a.position)) > 0.999)
+        // Turned 90° to the left (looking along -x): the panel went with the view.
+        let turn = simd_float4x4(simd_quatf(angle: .pi / 2, axis: [0, 1, 0]))
+        var turned = turn
+        turned.columns.3 = head.columns.3
+        let b = lock.update(head: turned, deltaTime: 0.01)!
+        #expect(simd_distance(b.position, [-0.9, 1.4, -0.3]) < 1e-4)
+        #expect(simd_distance(RAVEPanelHeadLock.offset(placing: b.position, head: turned), [0.3, -0.2, -0.9]) < 1e-4)
+        do { let r = lock.update(head: nil, deltaTime: 0.01); #expect(r?.position == b.position) }
+    }
+}
