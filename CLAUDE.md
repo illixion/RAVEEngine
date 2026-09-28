@@ -94,6 +94,42 @@ and the calibration it needs are sensing, polled through the same
 `RAVEInput` gets them with no new product to add. Only if the AVP → PC protocol is ever
 shared does `RAVEPCVR` get built; the Quest pieces stay here either way.
 
+### About the planned `RAVEPanel` target
+
+Decided 2026-09-28, not built yet. It is **a RealityKit panel that shows any SwiftUI view in
+the room**, with its chrome and its anchoring. It comes from spatial-ai-character's
+`ScreenPanel`, whose generic half is exactly what Longwave's planned hand-pinned web windows
+need:
+
+- the attachment and its hosting fix;
+- grab bar, resize corner and close button, with drag gain by distance, turning to face the
+  user, and physical scaling;
+- **anchors**, all with the same spring smoothing: *world* (a screen on a wall), *follow an
+  entity* (the character carrying it like a tablet), and *palm/wrist* (Longwave's chat, shown
+  when the wrist turns up);
+- **a visibility verdict**: in the scene, enabled, within the user's view (device pose
+  against the panel, with hysteresis) and, for palm anchors, the palm facing the user. The
+  app turns that into a pause of whatever the panel holds.
+
+Why here, not in RAVESDK: it is XR-shaped (entities, input bindings, anchoring), and the palm
+anchor needs `RAVEInput`, whose palm pose `RAVEHolo`'s palm anchor already uses. It is
+**content-agnostic** and must not import RAVESDK's `RAVEBrowser`. The app puts a browser view
+into the panel, and a Mac-streamed window can go into the same panel later. It is the
+RealityKit-host counterpart of `RAVEHolo`, which draws panels for Metal hosts.
+
+**The hosting fix it must carry** (measured on the AVP, 2026-09-28): a
+`ViewAttachmentComponent` added from outside SwiftUI is put into a window only when the
+entity's transform changes after it is already in the scene. Placing it in the same turn as
+the add leaves a `UIViewRepresentable` inside at 0×0 with no window: blank, until something
+moves it. Re-setting the same transform in a later frame is enough. A SwiftUI update of the
+`RealityView` is not.
+
+Build it when the Longwave overlay starts, not before, and move Longwave's own RealityKit
+palm HUD (`WristHUDDriver` in `FoveatedImmersiveView.swift`) onto it in the same change, so
+the target starts with two real consumers. Longwave's risk to measure first: the frame and
+power cost of a live page inside the foveated PCVR space (`ImmersiveSpace(foveatedStreaming:)`
+with RealityKit content on top). Constantly updating Twitch chat is a good worst case.
+
 ## The isolation rule (both targets)
 
 **The collection and sensing layers carry no isolation. This is a hard constraint, not a
