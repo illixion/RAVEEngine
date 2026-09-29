@@ -312,6 +312,15 @@ and decodes `leftIndex` with `decodeIfPresent` because one app never stored it â
 reserved joystick slot was not a value it kept. Synthesised `Codable` would reset every
 user's bindings.
 
+## Logging
+
+RAVEInput is the one target that logs, and it has the package's only external dependency,
+`../DebugTrace`. Its sources take a `log:` closure of `DebugLogMessage`, not `String`, so each
+value keeps its own privacy through the app's `DebugLogger`: a Quest's address (hashed),
+advertised name, controller vendor names and error text stay private, while counts,
+calibration figures and error codes are public. Apps forward the message as it is
+(`log: { AppLog.input.log("HandTracker: \($0)") }`). Never flatten it to a String.
+
 ## RAVEDiagnostics
 
 A convergence of four independent perf readouts that shared no code. All four are the same

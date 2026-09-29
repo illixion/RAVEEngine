@@ -68,6 +68,7 @@
  BSD broadcast socket here would buy nothing without the entitlement.
  */
 
+import DebugTrace
 import Foundation
 import Network
 import simd
@@ -183,7 +184,7 @@ public final class RAVEQuestBridgeSource: RAVETrackedControllerSource, @unchecke
     private let lock = NSLock()
     private let queue = DispatchQueue(label: "rave.input.questbridge", qos: .userInteractive)
     private let clock: @Sendable () -> Double
-    private let log: (@Sendable (String) -> Void)?
+    private let log: (@Sendable (DebugLogMessage) -> Void)?
 
     private var listener: NWListener?
     private var inbound: [ObjectIdentifier: (connection: NWConnection, lastActive: Double)] = [:]
@@ -209,7 +210,7 @@ public final class RAVEQuestBridgeSource: RAVETrackedControllerSource, @unchecke
     ///   - log: optional sink for connection and calibration events.
     public init(configuration: Configuration = Configuration(),
                 clock: @escaping @Sendable () -> Double = { ProcessInfo.processInfo.systemUptime },
-                log: (@Sendable (String) -> Void)? = nil) {
+                log: (@Sendable (DebugLogMessage) -> Void)? = nil) {
         self.configuration = configuration
         self.clock = clock
         self.log = log
@@ -265,8 +266,8 @@ public final class RAVEQuestBridgeSource: RAVETrackedControllerSource, @unchecke
         listener.newConnectionHandler = { [weak self] connection in self?.accept(connection) }
         listener.stateUpdateHandler = { [weak self] state in
             switch state {
-            case .ready: self?.log?("quest bridge: listening on UDP \(port)")
-            case .failed(let error): self?.log?("quest bridge: listener failed — \(error)")
+            case .ready: self?.log?("quest bridge: listening on UDP \(port, privacy: .public)")
+            case .failed(let error): self?.log?("quest bridge: listener failed — \(String(describing: error), privacy: .public)")
             default: break
             }
         }
@@ -349,8 +350,7 @@ public final class RAVEQuestBridgeSource: RAVETrackedControllerSource, @unchecke
         if let transform {
             saveTransform(transform)
             if firstSolve {
-                log?(String(format: "quest bridge: calibrated — %d pairs over %.2f m, residual %.0f mm",
-                            samples, spread, residual))
+                log?("quest bridge: calibrated — \(samples) pairs over \(spread, format: .fixed(precision: 2)) m, residual \(residual, format: .fixed(precision: 0)) mm")
             }
         }
         if result.pulse && configuration.pulseOnCalibrated {
@@ -545,8 +545,7 @@ public final class RAVEQuestBridgeSource: RAVETrackedControllerSource, @unchecke
             }
             lock.unlock()
             if first {
-                log?("quest bridge: controllers streaming from \(senderHost ?? "?") "
-                     + "(protocol v\(max(state.protocolVersion, 1)))")
+                log?("quest bridge: controllers streaming from \(senderHost ?? "?", privacy: .private(mask: .hash)) (protocol v\(max(state.protocolVersion, 1)))")
             }
 
         case .haptic, .status, nil:

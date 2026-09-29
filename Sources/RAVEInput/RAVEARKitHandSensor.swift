@@ -21,6 +21,7 @@
 #if os(visionOS)
 
 import ARKit
+import DebugTrace
 import Foundation
 import QuartzCore
 import simd
@@ -117,12 +118,12 @@ public final class RAVEARKitHandSensor: RAVEHandInputProvider {
     private let session = ARKitSession()
     private let provider = HandTrackingProvider()
     private var anchorTask: Task<Void, Never>?
-    private var logHandler: (@Sendable (String) -> Void)?
+    private var logHandler: (@Sendable (DebugLogMessage) -> Void)?
 
     public init(
         pinchTuning: RAVEPinchTuning = .standard,
         joystick: RAVEHandJoystick = RAVEHandJoystick(),
-        log: (@Sendable (String) -> Void)? = nil
+        log: (@Sendable (DebugLogMessage) -> Void)? = nil
     ) {
         self.pinchTuning = pinchTuning
         self.joystick = joystick
@@ -139,7 +140,7 @@ public final class RAVEARKitHandSensor: RAVEHandInputProvider {
         joystickChirality: RAVEHandChirality = .left,
         joystickFinger: RAVEHandFinger = .index,
         joystickPinchTuning: RAVEPinchTuning? = nil,
-        log: (@Sendable (String) -> Void)? = nil
+        log: (@Sendable (DebugLogMessage) -> Void)? = nil
     ) {
         self.init(pinchTuning: pinchTuning, joystick: joystick, log: log)
         self.joystickEnabled = joystickEnabled

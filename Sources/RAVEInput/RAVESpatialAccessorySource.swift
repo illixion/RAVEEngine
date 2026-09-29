@@ -31,6 +31,7 @@
 
 import ARKit
 import CoreHaptics
+import DebugTrace
 import Foundation
 import GameController
 import QuartzCore
@@ -47,7 +48,7 @@ public final class RAVESpatialAccessorySource: RAVETrackedControllerSource {
     public var isActive: Bool { !store.isEmpty && providerTask != nil }
 
     private nonisolated let store = Store()
-    private let log: (@Sendable (String) -> Void)?
+    private let log: (@Sendable (DebugLogMessage) -> Void)?
     private var observers: [NSObjectProtocol] = []
     /// Accessories by the controller they wrap, keyed by ObjectIdentifier —
     /// GCController is not Hashable.
@@ -62,7 +63,7 @@ public final class RAVESpatialAccessorySource: RAVETrackedControllerSource {
     private var hapticPlayers: [RAVEHandChirality: CHHapticPatternPlayer] = [:]
     private var lastHapticAt: [RAVEHandChirality: Double] = [:]
 
-    public init(log: (@Sendable (String) -> Void)? = nil) {
+    public init(log: (@Sendable (DebugLogMessage) -> Void)? = nil) {
         self.log = log
     }
 
@@ -154,7 +155,7 @@ public final class RAVESpatialAccessorySource: RAVETrackedControllerSource {
                 }
                 await self.restartProvider()
             } catch {
-                self?.log?("spatial controllers: accessory creation failed — \(error.localizedDescription)")
+                self?.log?("spatial controllers: accessory creation failed — \(error)")
             }
         }
     }
@@ -190,7 +191,7 @@ public final class RAVESpatialAccessorySource: RAVETrackedControllerSource {
         do {
             try await session.run([provider])
         } catch {
-            log?("spatial controllers: tracking run failed — \(error.localizedDescription)")
+            log?("spatial controllers: tracking run failed — \(error)")
             self.provider = nil
             return
         }
@@ -331,7 +332,7 @@ public final class RAVESpatialAccessorySource: RAVETrackedControllerSource {
                 }
             }
             do { try created.start() } catch {
-                log?("spatial controllers: haptic engine start failed — \(error.localizedDescription)")
+                log?("spatial controllers: haptic engine start failed — \(error)")
                 return
             }
             hapticEngines[side] = created
@@ -354,7 +355,7 @@ public final class RAVESpatialAccessorySource: RAVETrackedControllerSource {
             hapticPlayers[side] = player
             try player.start(atTime: CHHapticTimeImmediate)
         } catch {
-            log?("spatial controllers: haptic play failed — \(error.localizedDescription)")
+            log?("spatial controllers: haptic play failed — \(error)")
         }
     }
 }
