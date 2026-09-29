@@ -406,7 +406,7 @@ the link list.
 | `Longwave` (visionOS + iOS + macOS) | `RAVEInput`, `RAVEDiagnostics` (+ SDK's `RAVEUI`, `RAVEConsole`, `RAVEMedia`, `RAVECamera`) |
 | `halflife-visionos/LambdaVision` | `RAVEInput`, `RAVEDiagnostics`, `RAVERig`, `RAVEHolo` (+ SDK's `RAVEConsole`) |
 | `Hypnos` (visionOS + iOS) | `RAVEDiagnostics` (+ SDK's `RAVENet`, `RAVEUI`, `RAVEConsole`, `RAVEMedia`, `RAVESlideshow`) |
-| `spatial-ai-character` | `RAVEDiagnostics`, and `RAVERig` through its own `CharacterKit` package (+ SDK's `RAVEConsole`) |
+| `spatial-ai-character` | `RAVERig` through its own `CharacterKit` package (+ SDK's `RAVEConsole`); it dropped `RAVEDiagnostics` with the debug server |
 
 `RAVERig`'s two consumers are the reference case for the split rule: `CharacterKit` binds it
 to a RealityKit `SkeletalPose`, LambdaVision to a GoldSrc bone palette, and the shared half
