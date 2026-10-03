@@ -182,6 +182,7 @@ to pose a Half-Life player model from a tracked head and hands.
 |---|---|
 | `RigSkeleton` | A skeleton as a flat, parent-indexed joint list in Y-up metres. The input to every analysis here. |
 | `HumanoidInference` | Works out which joints are the hips, spine, head, arms and legs, from topology and skin weights rather than from names. |
+| `HandDigitMatching` | Finds each hand's thumb and finger order from geometry, and proposes how to cut a source hand down to the target's digits so the biped matcher maps finger to finger. |
 | `LegArchitecture` | Classifies a leg as plantigrade or digitigrade and finds its true ground contact — measured from where the joints sit, not from what they are called. |
 | `FABRIK` | Forward And Backward Reaching IK over a chain of points, with a pole constraint and reach/fold limits. Any number of segments. |
 | `PoseSolver` | Turns a FABRIK solution back into joint rotations, which is what a skeleton actually stores. |
