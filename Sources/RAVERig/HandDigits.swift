@@ -42,9 +42,14 @@ public enum HandDigitMatching {
         /// Which source fingers, by position from the thumb (0 = index), for
         /// the log.
         public var fingerPicks: [Int]
+        /// Target digits whose knuckle sits further along the chain than the
+        /// source's, and by how many joints — see `knuckleShift`. The caller
+        /// moves each joint's rotation that many joints tipward.
+        public var shifts: [(chain: [Int], by: Int)]
 
         public static func == (a: Candidate, b: Candidate) -> Bool {
             a.keep == b.keep && a.fingerPicks == b.fingerPicks
+                && a.shifts.map(\.chain) == b.shifts.map(\.chain) && a.shifts.map(\.by) == b.shifts.map(\.by)
                 && a.expected.map(\.source) == b.expected.map(\.source)
                 && a.expected.map(\.target) == b.expected.map(\.target)
         }
@@ -113,17 +118,17 @@ public enum HandDigitMatching {
             (sourceAnalysis.landmarks.leftHand, targetAnalysis.landmarks.leftHand),
             (sourceAnalysis.landmarks.rightHand, targetAnalysis.landmarks.rightHand),
         ]
-        let hands = sides.compactMap { s, t -> (HandDigits, HandDigits, Int)? in
+        let hands = sides.compactMap { s, t -> (HandDigits, HandDigits, Int, Int)? in
             guard let s, let t else { return nil }
             return (digits(of: source, hand: s, within: sourceAnalysis.keep),
-                    digits(of: target, hand: t, within: targetAnalysis.keep), s)
+                    digits(of: target, hand: t, within: targetAnalysis.keep), s, t)
         }
         guard hands.count == 2 else { return [] }
 
         let k = hands.map { $0.1.fingers.count }.min() ?? 0
         let m = hands.map { $0.0.fingers.count }.min() ?? 0
         guard k > 0, m >= k else { return [] }
-        let agree = hands.allSatisfy { s, t, _ in
+        let agree = hands.allSatisfy { s, t, _, _ in
             s.fingers.map(\.count) == t.fingers.map(\.count) && s.thumb?.count == t.thumb?.count
         }
         if agree { return [] }
@@ -138,23 +143,69 @@ public enum HandDigitMatching {
         return picks.map { pick in
             var keep = sourceAnalysis.keep
             var expected: [(source: Int, target: Int)] = []
-            for (sourceHand, targetHand, sourceHandIndex) in hands {
+            var shifts: [(chain: [Int], by: Int)] = []
+            for (sourceHand, targetHand, sourceHandIndex, targetHandIndex) in hands {
+                func pair(_ s: [Int], _ t: [Int]) {
+                    expected.append((s[0], t[0]))
+                    let by = knuckleShift(source: source, sourceHand: sourceHandIndex, sourceChain: s,
+                                          target: target, targetHand: targetHandIndex, targetChain: t)
+                    if by > 0 { shifts.append((t, by)) }
+                }
                 for root in source.childIndices[sourceHandIndex] { keep.subtract(source.subtree(from: root)) }
                 // Thumb to thumb; a target without one leaves the source's out.
                 if let s = sourceHand.thumb, let t = targetHand.thumb {
                     keep.formUnion(s.prefix(t.count))
-                    expected.append((s[0], t[0]))
+                    pair(s, t)
                 }
                 for (targetSlot, sourceSlot) in pick.enumerated() {
                     let s = sourceHand.fingers[sourceSlot], t = targetHand.fingers[targetSlot]
                     // Cut to the target's joint count: from the tip, so the
                     // weightless tip marker and the last real bone go first.
                     keep.formUnion(s.prefix(t.count))
-                    expected.append((s[0], t[0]))
+                    pair(s, t)
                 }
             }
-            return Candidate(keep: keep, expected: expected, fingerPicks: pick)
+            return Candidate(keep: keep, expected: expected, fingerPicks: pick, shifts: shifts)
         }
+    }
+
+    /// How many joints further along the target digit its knuckle sits than
+    /// the source's does.
+    ///
+    /// The matcher pairs digit roots, so when the target's root is a
+    /// metacarpal — a bone inside the palm, which Mixamo does not have — the
+    /// source's knuckle curl lands in the middle of the palm. On Synth that
+    /// put Idle's 33° proximal bend at `Index_Base`, ahead of 45° and 24° at
+    /// the two joints after it, and the fingers folded into the palm. Synth's
+    /// own Unity avatar map leaves `Index_Base` unmapped for this reason.
+    ///
+    /// Measured, not named: each joint's distance from the wrist as a share
+    /// of the wrist-to-fingertip length. The source root (a knuckle) sits at
+    /// 0.51 on Mixamo's index; Synth's `Index_Base` at 0.25 and `Index_1` at
+    /// 0.69, so the knuckle is the second joint. Its thumb roots line up
+    /// (0.28 against 0.34) and are left alone.
+    public static func knuckleShift(source: RigSkeleton, sourceHand: Int, sourceChain: [Int],
+                                    target: RigSkeleton, targetHand: Int, targetChain: [Int]) -> Int {
+        func fractions(_ rig: RigSkeleton, _ hand: Int, _ chain: [Int]) -> [Float] {
+            let wrist = rig.joints[hand].restHead
+            let points = chain.map { rig.joints[$0].restHead }
+            // The tip lies past the last joint; without a tail, assume one
+            // more segment as long as the last.
+            let last = points.count > 1 ? points[points.count - 1] - points[points.count - 2] : .zero
+            let tip = rig.joints[chain.last!].restTail ?? (points.last! + last)
+            let length = simd_length_f(tip - wrist)
+            guard length > 1e-5 else { return points.map { _ in 0 } }
+            return points.map { simd_length_f($0 - wrist) / length }
+        }
+        // Over the joints actually handed to the matcher: a weightless tip
+        // marker left on would stretch the source hand and pull its knuckle
+        // back towards the wrist (0.45 instead of 0.51 on Mixamo's index —
+        // close enough to Synth's metacarpal to pick it).
+        let knuckle = fractions(source, sourceHand, Array(sourceChain.prefix(targetChain.count)))[0]
+        let candidates = fractions(target, targetHand, targetChain)
+        let nearest = candidates.indices.min { abs(candidates[$0] - knuckle) < abs(candidates[$1] - knuckle) } ?? 0
+        // Never shift so far that nothing is left to drive.
+        return min(nearest, max(0, targetChain.count - 1))
     }
 
     private static func displacement(_ pick: [Int]) -> Int {

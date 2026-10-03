@@ -99,3 +99,30 @@ private func names(_ chain: [Int]?, _ rig: RigSkeleton) -> [String] {
         target: a, targetAnalysis: try HumanoidInference.analyse(a))
     #expect(candidates.isEmpty)
 }
+
+@Test func movesTheKnuckleOffAMetacarpal() throws {
+    // Synth's fingers start with a bone inside the palm: the root sits near
+    // the wrist and the first segment runs to the knuckle. The matcher pairs
+    // roots, so without a shift the source's knuckle bend lands mid-palm.
+    let source = rig(fingers: 4, joints: 4, marker: true)
+    var joints = rig(fingers: 2, joints: 3, marker: false).joints
+    for side in ["L", "R"] {
+        let sign: Float = side == "L" ? 1 : -1
+        for name in ["index", "middle"] {
+            let z: Float = name == "index" ? 0.02 : 0
+            let positions: [SIMD3<Float>] = [[sign * 0.665, 1.44, z], [sign * 0.73, 1.44, z], [sign * 0.76, 1.44, z]]
+            for (n, p) in positions.enumerated() {
+                let i = try #require(joints.firstIndex { $0.name == "\(name)\(n + 1)\(side)" })
+                joints[i].restHead = p
+            }
+        }
+    }
+    let target = RigSkeleton(joints: joints, meshBoundsMin: [-0.8, 0, -0.2], meshBoundsMax: [0.8, 1.8, 0.2])
+    let best = try #require(HandDigitMatching.candidates(
+        source: source, sourceAnalysis: try HumanoidInference.analyse(source),
+        target: target, targetAnalysis: try HumanoidInference.analyse(target)).first)
+
+    let shifted = best.shifts.map { "\(target.joints[$0.chain[0]].name)+\($0.by)" }
+    #expect(Set(shifted) == ["index1L+1", "middle1L+1", "index1R+1", "middle1R+1"],
+            "fingers shift one joint; the thumb, whose root is already the knuckle, does not")
+}
