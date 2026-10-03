@@ -46,9 +46,15 @@ public enum HandDigitMatching {
         /// source's, and by how many joints — see `knuckleShift`. The caller
         /// moves each joint's rotation that many joints tipward.
         public var shifts: [(chain: [Int], by: Int)]
+        /// Source fingers whose motion the kept finger should carry, averaged:
+        /// the carrier (a kept source chain) and every source finger its target
+        /// digit stands for, the carrier included. Only where that is more than
+        /// the carrier itself.
+        public var blends: [(carrier: [Int], members: [[Int]])] = []
 
         public static func == (a: Candidate, b: Candidate) -> Bool {
             a.keep == b.keep && a.fingerPicks == b.fingerPicks
+                && a.blends.map(\.carrier) == b.blends.map(\.carrier) && a.blends.map(\.members) == b.blends.map(\.members)
                 && a.shifts.map(\.chain) == b.shifts.map(\.chain) && a.shifts.map(\.by) == b.shifts.map(\.by)
                 && a.expected.map(\.source) == b.expected.map(\.source)
                 && a.expected.map(\.target) == b.expected.map(\.target)
@@ -144,6 +150,7 @@ public enum HandDigitMatching {
             var keep = sourceAnalysis.keep
             var expected: [(source: Int, target: Int)] = []
             var shifts: [(chain: [Int], by: Int)] = []
+            var blends: [(carrier: [Int], members: [[Int]])] = []
             for (sourceHand, targetHand, sourceHandIndex, targetHandIndex) in hands {
                 func pair(_ s: [Int], _ t: [Int]) {
                     expected.append((s[0], t[0]))
@@ -163,9 +170,20 @@ public enum HandDigitMatching {
                     // weightless tip marker and the last real bone go first.
                     keep.formUnion(s.prefix(t.count))
                     pair(s, t)
+                    // What the target digit stands for, anatomically: its own
+                    // slot, and the last digit also every source finger past
+                    // it. A three-digit hand's second finger is the middle,
+                    // ring and pinky at once; driven by the ring alone it
+                    // curled twice as far as the index beside it in Idle.
+                    let covered = targetSlot == k - 1
+                        ? Array(targetSlot..<sourceHand.fingers.count)
+                        : [targetSlot]
+                    let members = covered.map { Array(sourceHand.fingers[$0].prefix(t.count)) }
+                    let carrier = Array(s.prefix(t.count))
+                    if members != [carrier] { blends.append((carrier, members)) }
                 }
             }
-            return Candidate(keep: keep, expected: expected, fingerPicks: pick, shifts: shifts)
+            return Candidate(keep: keep, expected: expected, fingerPicks: pick, shifts: shifts, blends: blends)
         }
     }
 

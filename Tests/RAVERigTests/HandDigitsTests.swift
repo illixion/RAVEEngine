@@ -90,6 +90,13 @@ private func names(_ chain: [Int]?, _ rig: RigSkeleton) -> [String] {
     let pairs = best.expected.map { "\(source.joints[$0.source].name)>\(target.joints[$0.target].name)" }
     #expect(Set(pairs) == ["thumb1L>thumb1L", "index1L>index1L", "middle1L>middle1L",
                            "thumb1R>thumb1R", "index1R>index1R", "middle1R>middle1R"])
+    // The target's last finger stands for every source finger from its own
+    // slot outward: middle, ring and pinky, averaged into the kept middle.
+    let blends = best.blends.map { blend in
+        "\(source.joints[blend.carrier[0]].name)<" + blend.members.map { source.joints[$0[0]].name }.joined(separator: "+")
+    }
+    #expect(Set(blends) == ["middle1L<middle1L+ring1L+pinky1L", "middle1R<middle1R+ring1R+pinky1R"])
+    #expect(best.blends.allSatisfy { $0.members.allSatisfy { $0.count == 3 } }, "members cut like the carrier")
 }
 
 @Test func matchingHandsNeedNoCandidates() throws {
