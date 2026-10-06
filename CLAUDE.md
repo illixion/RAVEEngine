@@ -52,7 +52,7 @@ sits behind `RAVEHandInputProvider`, which returns `RAVENoHandInput` off-visionO
 
 | Target | Purpose |
 |---|---|
-| `RAVEInput` | Hand + controller sensing, pinch/joystick/palm geometry, binding tables, tracked controllers (PSVR2 Sense; Quest Touch over the LAN via Controller Bridge) |
+| `RAVEInput` | Hand + controller sensing, pinch/joystick/palm geometry, binding tables, tracked controllers (PSVR2 Sense; Quest Touch over the LAN via Controller Bridge), physical mouse (`RAVEMouseSource`) |
 | `RAVEDiagnostics` | Frame profiler, metric collector, feed gating, HUD views |
 | `RAVERig` | Skeleton geometry, humanoid inference, FABRIK, pose solving, leg stepping — shipping, see README |
 | `RAVEHolo` | In-world holographic UI for Metal hosts: SDF glyph atlas (CoreText, no font shipped), panel/gauge/text scene, Metal 4 renderer drawing into a pass the host owns. Shader source compiles at runtime (SwiftPM's CLI builds no `.metal`); `RAVEHOLO_SNAPSHOT=/x.png swift test --filter RAVEHolo` renders a sample panel to look at. Renderer is `@available(macOS 26)` (Metal 4) without raising the package floor. Also interactive: pinchable targets (Compositor Services tracking areas + a CPU ray hit-test), widgets/stack layout, and a palm anchor (`RAVEHoloPalmAnchor`, an alias of RAVEInput's `RAVEPalmAnchor`, shared with `RAVEPanel`) — see "RAVEHolo: interactive panels". Depends on `RAVEInput` for the anchor only. Consumers: LambdaVision (HEV HUD + developer palm debug panel), Oneiros (Metal-host wrist HUD) |
@@ -305,6 +305,24 @@ A persisted transform is restored **untrusted** by default (`trustRestoredCalibr
 false`): ARKit re-establishes its world origin every session, so last launch's transform is
 right only when the origin lands in the same place. Untrusted, it publishes nothing until one
 fresh pair agrees, and the watchdog discards it within a second when none does.
+
+### Mouse
+
+`RAVEMouseSource.shared` owns every `GCMouse`'s handler slots and fans plain `RAVEMouseEvent`s
+(connect/disconnect with a count, raw motion +Y up, buttons incl. auxiliary, one wheel axis per
+event) out to `@MainActor` subscribers on the main queue. **It is a process-wide singleton on
+purpose:** a `GCMouseInput` handler is a single slot, so two parts of one app installing their own
+(Longwave's Moonlight session and its Mac desktop bridge) silently stole the mouse from each other.
+The first `subscribe` starts it, the last `cancel` stops it, and a late subscriber is replayed a
+`.connected` per mouse already there. `isConnected` is nonisolated — the signal to stand down the
+system pointer paths that deliver the same click again (SwiftUI taps, spatial events).
+
+The shared arithmetic is value types: `RAVEMouseStepAccumulator` (carry the fraction, truncate
+toward zero), `RAVEMouseButtonGate` (forward a press only when allowed, always its release, never
+a second press of a held button), and the lock-guarded `RAVEMouseMotionAccumulator` for a render
+thread draining per-frame motion. Speed curves, wheel clamps, Y inversion and wire encodings stay
+in the apps. Converged from LambdaVision's `MouseInput` and Longwave's `MoonlightMouseManager` /
+`MacNativeMouseBridge` (2026-10-06); the GameController half is unverified on device.
 
 **`RAVEFingerBindingTable`'s `Codable` is hand-written and wire-compatible.** It emits the
 same named fields (`rightIndex`, `rightMiddle`, …) two apps already have in `UserDefaults`,
