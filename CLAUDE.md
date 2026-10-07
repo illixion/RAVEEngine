@@ -330,7 +330,10 @@ visionOS sends `GCMouse`/`GCKeyboard` to the app only while the pointer is over 
 windows, never over a full immersive space, and no API changes that (visionOS 26/27). A window
 that draws nothing still counts, so the workaround is an invisible "catcher" window kept in front
 of the user. Confirmed on device in LambdaVision 2026-10-07 (GCMouse flowed, the mouse drove the
-game); verified with a visible tint first, a fully clear fill still to be confirmed.
+game). **It must draw something:** `Color.clear` with a `contentShape` did not catch (the
+pointer hit-tests drawn pixels, not SwiftUI shapes); a visible tint did. UIKit documents the same
+rule for its hit-testing (alpha below 0.01 is ignored), so start at a white fill of 0.01 and step up
+if GCMouse stays silent; the lowest alpha that works on device is still to be measured.
 
 RAVEInput holds the framework-free half: `RAVEMouseCatcherRule` (up or not, with a loggable
 reason), `RAVEEventRate` (events in the last second for a `/state` counter) and
@@ -341,14 +344,15 @@ LambdaVision does it (`InputCatcher.swift`):
 - **Scene:** `Window(id:)` with `.windowStyle(.plain)` (no glass), `.windowResizability(.contentSize)`
   and a big frame (4000×2600 pt asked; the system clamps), `.defaultLaunchBehavior(.suppressed)`,
   `.restorationBehavior(.disabled)`, `.persistentSystemOverlays(.hidden)` on the scene and the view.
-  Content: `Color.clear.contentShape(Rectangle())`, `.hoverEffectDisabled()`,
+  Content: a faint fill (`Color.white.opacity(0.01)`, never clear), `.hoverEffectDisabled()`,
   `.handlesGameControllerEvents(matching: .gamepad)` (every window needs it, or a gazed window
   freezes polled pad values).
 - **Lifecycle:** a main-actor loop (~4 Hz) evaluates the rule and calls `openWindow(id:)` /
   `dismissWindow(id:)`, captured from the window that stays up under the space (the main
-  window). Also dismiss from the catcher's own `\.dismissWindow` and treat its
-  `scenePhase == .background` as closed: a dismiss through another window's action did not
-  always land, which left the state saying open after the space closed.
+  window). Neither that `dismissWindow(id:)` nor the catcher's own `dismissWindow()` closed it
+  once the immersive space had closed (device, 2026-10-07). Capture the catcher's `UIWindowScene`
+  from inside it, read "open" from UIKit (still in `connectedScenes`, not background), and fall
+  back to `UIApplication.shared.requestSceneSessionDestruction(scene.session, …)`.
 - **Pinches:** a gaze-pinch on the catcher reaches it, not the immersive layer. Forward its
   `SpatialEventGesture(coordinateSpace: .immersiveSpace)` events to the same handler as the
   layer's `onSpatialEvent`. The selection ray is in SwiftUI's space (points, +Y down), so negate Y

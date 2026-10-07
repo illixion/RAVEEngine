@@ -6,9 +6,10 @@
  pointer is in a full immersive space (a CompositorLayer, or a RealityKit
  space) and not over one of the app's windows, the app gets no mouse events,
  and clicks land in its other windows. No API claims the mouse for an
- immersive space (visionOS 26/27). A window still counts when it draws
- nothing, so the workaround is a large plain window with no glass, no content
- and no system controls, kept in front of the user while a mouse is in use.
+ immersive space (visionOS 26/27). The workaround is a large plain window
+ with no glass and no system controls, kept in front of the user while a
+ mouse is in use. It must draw something: a fully clear window lets the
+ pointer through (device, 2026-10-07), a faint fill (alpha ~0.01) does not.
  Confirmed on device in LambdaVision (2026-10-07): with it up, GCMouse events
  flowed and the mouse drove the game.
 
