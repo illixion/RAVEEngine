@@ -186,7 +186,87 @@ public struct PoseSolver: Sendable {
         let solution = FABRIK.solve(chain: points, target: target, pole: pole,
                                     bendTowardPole: bendTowardPole,
                                     iterations: iterations, reachLimit: reachLimit)
+        place(joints, at: solution.positions, weight: weight, pose: &pose, model: &model)
+        return Report(error: solution.error, reached: solution.reached,
+                      extended: solution.extended, outOfReach: solution.outOfReach,
+                      folded: solution.folded, iterations: solution.iterations)
+    }
 
+    /// Bends a leg so its last joint reaches `target`, in closed form.
+    ///
+    /// A three-joint chain (hip, knee, ankle) is the textbook two-bone solve.
+    /// A four-joint chain is a digitigrade leg (hip, knee, hock, toe): its
+    /// last segment keeps the direction it has in `pose`, which fixes where
+    /// the hock must be, and the hip, knee and hock are then solved as two
+    /// bones. Either way the knee goes toward `pole`.
+    ///
+    /// FABRIK reaches the same targets, but on a chain longer than two bones
+    /// it chooses among many shapes that all reach, starting from whatever
+    /// the clip happened to show. Measured on the headset with the Synth's
+    /// four-segment legs, that was a leg that changed shape between frames —
+    /// crossing over the other, or lying nearly flat — and a gait that read as
+    /// a series of snaps. This has exactly one answer for a given target and
+    /// pole, so neighbouring frames give neighbouring legs.
+    ///
+    /// Any other length falls back to `solve`.
+    @discardableResult
+    public func solveLeg(chain: Chain,
+                         target: SIMD3<Float>,
+                         pole: SIMD3<Float>,
+                         weight: Float = 1,
+                         reachLimit: Float = 0.98,
+                         pose: inout [JointPose],
+                         model: inout [float4x4]) -> Report {
+        let joints = chain.joints
+        guard joints.count == 3 || joints.count == 4 else {
+            return solve(chain: chain, target: target, pole: pole, bendTowardPole: true,
+                         weight: weight, reachLimit: reachLimit, pose: &pose, model: &model)
+        }
+        guard joints.allSatisfy({ $0 < pose.count && $0 < model.count }) else { return .unsolved }
+        let points = joints.map { Self.translation(of: model[$0]) }
+        let hip = points[0]
+        let thigh = simd_length(points[1] - points[0])
+        let shin = simd_length(points[2] - points[1])
+        // The digitigrade foot, held as the pose has it.
+        let foot = joints.count == 4 ? points[3] - points[2] : .zero
+        let ankleTarget = target - foot
+
+        var toAnkle = ankleTarget - hip
+        let wanted = simd_length(toAnkle)
+        let longest = (thigh + shin) * reachLimit
+        let shortest = abs(thigh - shin) * 1.02 + 1e-4
+        let d = min(max(wanted, shortest), longest)
+        toAnkle = wanted > 1e-6 ? toAnkle / wanted : SIMD3<Float>(0, -1, 0)
+
+        // The bend plane holds the hip-to-ankle line and the pole. A pole
+        // along that line says nothing; keep the knee where it was then.
+        var side = pole - simd_dot(pole, toAnkle) * toAnkle
+        if simd_length(side) < 1e-4 {
+            let current = points[1] - hip
+            side = current - simd_dot(current, toAnkle) * toAnkle
+        }
+        side = simd_length(side) > 1e-6 ? simd_normalize(side) : SIMD3<Float>(0, 0, 1)
+
+        // Law of cosines: how far along the line the knee projects, and how
+        // far off it toward the pole.
+        let along = (thigh * thigh - shin * shin + d * d) / (2 * d)
+        let off = sqrt(max(thigh * thigh - along * along, 0))
+        let knee = hip + toAnkle * along + side * off
+        let ankle = hip + toAnkle * d
+        var positions = [hip, knee, ankle]
+        if joints.count == 4 { positions.append(ankle + foot) }
+
+        place(joints, at: positions, weight: weight, pose: &pose, model: &model)
+        let tip = Self.translation(of: model[joints[joints.count - 1]])
+        let error = simd_length(tip - target)
+        return Report(error: error, reached: error < 0.002,
+                      extended: wanted >= longest, outOfReach: wanted > thigh + shin,
+                      folded: wanted < shortest, iterations: 1)
+    }
+
+    /// Turns each joint of `joints` so the next lands on `positions`.
+    private func place(_ joints: [Int], at positions: [SIMD3<Float>], weight: Float,
+                       pose: inout [JointPose], model: inout [float4x4]) {
         // Walk from the root of the chain down, turning each joint so its
         // child lands where the solution puts it. This order matters: rotating
         // a joint carries everything beneath it, so by the time a link is
@@ -204,7 +284,7 @@ public struct PoseSolver: Sendable {
             let origin = Self.translation(of: here)
             let childNow = Self.translation(of: here * pose[child].matrix)
             let old = Self.normalized(childNow - origin)
-            let new = Self.normalized(solution.positions[step + 1] - origin)
+            let new = Self.normalized(positions[step + 1] - origin)
             var turn = Self.rotation(from: old, to: new)
             if weight < 0.999 {
                 turn = simd_slerp(simd_quatf(angle: 0, axis: SIMD3<Float>(0, 1, 0)),
@@ -223,10 +303,6 @@ public struct PoseSolver: Sendable {
         // The tip carries no child in this chain, so its orientation is
         // whatever its parent handed it; only its model matrix is refreshed.
         model[joints[joints.count - 1]] = parentMatrix * pose[joints[joints.count - 1]].matrix
-
-        return Report(error: solution.error, reached: solution.reached,
-                      extended: solution.extended, outOfReach: solution.outOfReach,
-                      folded: solution.folded, iterations: solution.iterations)
     }
 
     // MARK: - Geometry
