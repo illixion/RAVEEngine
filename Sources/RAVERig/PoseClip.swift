@@ -117,8 +117,19 @@ public struct PosePlayer: Sendable {
 
     /// Moves on `deltaTime` seconds and returns the pose to show.
     public mutating func advance(_ deltaTime: Float) -> [JointPose] {
+        guard clip != nil else { return pose }
+        return advance(deltaTime, at: time + deltaTime * rate)
+    }
+
+    /// Shows the clip at `clipTime` rather than at wherever `rate` would have
+    /// taken it, while any crossfade still runs on `deltaTime`.
+    ///
+    /// For a clip whose clock is something other than time: a walk locked to
+    /// the steps the legs are actually taking, so the arms and body swing
+    /// with the feet at whatever pace the feet go.
+    public mutating func advance(_ deltaTime: Float, at clipTime: Float) -> [JointPose] {
         guard let clip else { return pose }
-        time += deltaTime * rate
+        time = clipTime
         var out = clip.sample(at: time)
         if let from = fadeFrom {
             fadeElapsed += deltaTime

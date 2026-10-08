@@ -82,3 +82,33 @@ private func points(_ solver: PoseSolver, _ pose: [JointPose]) -> [SIMD3<Float>]
     #expect(simd_distance(after[2], target) < 1e-3)
     #expect(after[1].z > 0.15, "knee forward of the hip-ankle line")
 }
+
+/// The knee follows the foot target, not the clip's ankle. A clip that rocks
+/// its ankle by 20° while the target stays put used to swing the knee by
+/// 28°, because the toe was read from the live pose.
+@Test func theKneeIgnoresTheClipsAnkleWhenTheToeIsHeld() {
+    let solver = PoseSolver(parents: [nil, 0, 1, 2])
+    let chain = PoseSolver.Chain(joints: [0, 1, 2, 3])
+    let target = SIMD3<Float>(0.0, -0.85, 0.12)
+    let held = SIMD3<Float>(0, -0.05, 0.12)
+    var knees: [Float] = []
+    for frame in 0..<90 {
+        let ankle = 20 * sin(Float(frame) / 90 * 2 * .pi)
+        var pose = [
+            JointPose(translation: [0, 0, 0]),
+            JointPose(translation: [0, -0.45, 0]),
+            JointPose(rotation: simd_quatf(angle: ankle * .pi / 180, axis: [1, 0, 0]),
+                      translation: [0, -0.40, 0]),
+            JointPose(translation: held),
+        ]
+        var model = solver.modelMatrices(of: pose)
+        solver.solveLeg(chain: chain, target: target, pole: [0, 0, -1], heldFoot: held,
+                        pose: &pose, model: &model)
+        let m = solver.modelMatrices(of: pose)
+        let p = (0...3).map { PoseSolver.translation(of: m[$0]) }
+        let a = simd_normalize(p[0] - p[1]), b = simd_normalize(p[2] - p[1])
+        knees.append(acos(simd_clamp(simd_dot(a, b), -1, 1)) * 180 / .pi)
+    }
+    let spread = (knees.max() ?? 0) - (knees.min() ?? 0)
+    #expect(spread < 0.1, "the knee moved \(spread)° as the ankle rocked")
+}

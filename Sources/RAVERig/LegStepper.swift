@@ -26,6 +26,20 @@ public struct LegStepper: Sendable {
     public var footSpacing: Float
     /// Peak height of the swinging foot above the floor.
     public var liftHeight: Float
+    /// How far a foot can be from its hip joint, in the stepper's units: the
+    /// leg's length, hip to ground contact. Nil leaves the stepper unbounded,
+    /// which is what a placement without a rig to check against gets.
+    ///
+    /// Every target the stepper hands out is held inside this, so the solver
+    /// is only ever asked for points the leg can stand on. A target past it
+    /// is not a pose the leg can make: the solver straightens the leg at the
+    /// wrong place and the foot pops when it gives up.
+    public var reach: Float?
+    /// How far the hip joint sits above the ground contact at rest, in the
+    /// stepper's units. With `reach` it gives the horizontal room a foot has
+    /// around the hip: a foot directly below has `reach` less `hipDrop` to
+    /// spend, which is much less than a leg's length.
+    public var hipDrop: Float
     /// Share of a step the foot spends on the ground. Real walks overlap —
     /// both feet are down for part of the cycle — which is what keeps a walk
     /// from reading as a run.
@@ -63,11 +77,37 @@ public struct LegStepper: Sendable {
     private var closedThisStop = 0
 
     public init(stepLength: Float, footSpacing: Float,
-                liftHeight: Float = 0.06, stanceFraction: Float = 0.62) {
+                liftHeight: Float = 0.06, stanceFraction: Float = 0.62,
+                reach: Float? = nil, hipDrop: Float = 0) {
         self.stepLength = max(stepLength, 0.01)
         self.footSpacing = footSpacing
         self.liftHeight = liftHeight
         self.stanceFraction = min(max(stanceFraction, 0.5), 0.95)
+        self.reach = reach
+        self.hipDrop = hipDrop
+    }
+
+    /// The point nearest `point` that the leg can reach from `hip`, with the
+    /// height kept: only the horizontal distance is clamped, because the
+    /// height is the floor's and the hip's, not the stepper's to change.
+    ///
+    /// Clamped a little inside the true reach, so the solver is never handed
+    /// a target it has to straighten to touch.
+    func withinReach(_ point: SIMD3<Float>, hip: SIMD3<Float>) -> SIMD3<Float> {
+        guard let reach else { return point }
+        let room = sqrt(max(reach * reach - hipDrop * hipDrop, 0)) * 0.97
+        var offset = SIMD2<Float>(point.x - hip.x, point.z - hip.z)
+        let distance = simd_length(offset)
+        guard distance > room else { return point }
+        offset *= room / max(distance, 1e-6)
+        return SIMD3<Float>(hip.x + offset.x, point.y, hip.z + offset.y)
+    }
+
+    /// The hip joint a foot hangs from: beside the body on the foot's side,
+    /// at the height the hip rests above the ground.
+    func hipJoint(hips: SIMD3<Float>, across: SIMD3<Float>, foot: Int) -> SIMD3<Float> {
+        let side = across * (footSpacing / 2) * (foot == 0 ? 1 : -1)
+        return hips + side + SIMD3<Float>(0, hipDrop, 0)
     }
 
     /// One foot's placement this frame.
@@ -100,6 +140,18 @@ public struct LegStepper: Sendable {
         closedThisStop = 0
     }
 
+    /// Changes the step length without moving the feet.
+    ///
+    /// The cycle is `distance / stepLength`, so assigning `stepLength`
+    /// directly mid-walk jumps every foot to a different point of its step.
+    /// This scales the distance with it, keeping the phase where it was.
+    public mutating func rescale(stepLength newLength: Float) {
+        let newLength = max(newLength, 0.01)
+        guard abs(newLength - stepLength) > 1e-6 else { return }
+        distance *= newLength / stepLength
+        stepLength = newLength
+    }
+
     /// Starts a walk from wherever the feet are standing.
     ///
     /// `reset` forgets the plants, and the first step then puts both feet
@@ -120,6 +172,11 @@ public struct LegStepper: Sendable {
 
     /// Where the closing foot is headed, kept for the diagnostics.
     private var closeTarget: SIMD3<Float>?
+    /// Whether the foot now closing was already in the air when the walk
+    /// stopped. Such a foot is brought down from where it is, rather than
+    /// lifted again: a fresh arc from the ground jumped it up by the lift
+    /// height and hung it there before it landed.
+    private var closeFromAir = false
 
     /// Advances the cycle and returns where both feet belong.
     ///
@@ -177,6 +234,12 @@ public struct LegStepper: Sendable {
             let ahead = min(stepLength / 2, max(remaining ?? .infinity, 0))
             var landing = hips + forward * ahead + side
             landing.y = floor(landing)
+            // The stride shortens to what the leg reaches, rather than
+            // placing the foot where the leg can only follow by straightening.
+            if reach != nil {
+                let hip = hipJoint(hips: hips, across: across, foot: foot)
+                landing = withinReach(landing, hip: hip)
+            }
 
             let planted = local < stanceFraction
             defer { wasPlanted[foot] = planted }
@@ -211,11 +274,15 @@ public struct LegStepper: Sendable {
                 // simply on the wrong side of them. The solver then reaches
                 // across the body for it, which is the legs crossing and the
                 // shins clipping through each other on a turn-and-walk-back.
-                if let held = plant[foot],
-                   !within(reach: held, of: hips)
-                    || !onOwnSide(held, of: hips, across: across, foot: foot) {
+                if let held = plant[foot], !onOwnSide(held, of: hips, across: across, foot: foot) {
                     plant[foot] = landing
                     takeoff[foot] = landing
+                } else if let held = plant[foot], reach != nil {
+                    // Past the leg's reach the plant is held at its nearest
+                    // reachable point. The foot slides the little the body
+                    // has moved on, rather than jumping to a new footprint.
+                    let hip = hipJoint(hips: hips, across: across, foot: foot)
+                    plant[foot] = withinReach(held, hip: hip)
                 }
                 return Placement(position: plant[foot] ?? landing, planted: true)
             }
@@ -290,10 +357,14 @@ public struct LegStepper: Sendable {
         lastForward = forward
         let across = simd_normalize(SIMD3<Float>(forward.z, 0, -forward.x))
 
+        func bounded(_ point: SIMD3<Float>, _ foot: Int) -> SIMD3<Float> {
+            reach == nil ? point
+                : withinReach(point, hip: hipJoint(hips: hips, across: across, foot: foot))
+        }
         func neutral(_ foot: Int) -> SIMD3<Float> {
             var point = hips + across * (footSpacing / 2) * (foot == 0 ? 1 : -1)
             point.y = floor(point)
-            return point
+            return bounded(point, foot)
         }
         // Where the foot actually is. A foot that was in the air when the
         // walk stopped is at its swing position, not at the plant it took
@@ -301,8 +372,8 @@ public struct LegStepper: Sendable {
         // old footprint in one frame, which was the snap at the end of a
         // walk.
         func current(_ foot: Int) -> SIMD3<Float> {
-            if wasPlanted[foot] { return plant[foot] ?? swinging[foot] ?? neutral(foot) }
-            return swinging[foot] ?? plant[foot] ?? neutral(foot)
+            if wasPlanted[foot] { return bounded(plant[foot] ?? swinging[foot] ?? neutral(foot), foot) }
+            return bounded(swinging[foot] ?? plant[foot] ?? neutral(foot), foot)
         }
         // Close enough to stand on. A tenth of a step for the first foot, so
         // the pose handed back is a standing one; a third of a step after
@@ -317,7 +388,9 @@ public struct LegStepper: Sendable {
             // further from where it should be.
             if let air = (0...1).first(where: { !wasPlanted[$0] && swinging[$0] != nil }) {
                 closing = air
+                closeFromAir = true
             } else {
+                closeFromAir = false
                 let gaps = (0...1).map { simd_distance(current($0), neutral($0)) }
                 if let worst = gaps.firstIndex(of: gaps.max()!), gaps[worst] > tolerance {
                     closing = worst
@@ -349,7 +422,9 @@ public struct LegStepper: Sendable {
         let travel = max(simd_distance(closeFrom, toward), 0.01)
         closeProgress = min(1, closeProgress + footTravel / travel)
         var moving = simd_mix(closeFrom, toward, SIMD3<Float>(repeating: closeProgress))
-        moving.y += sin(pow(closeProgress, 0.65) * .pi) * liftHeight * 0.6
+        // A foot already in the air is only ever brought down, so its height
+        // falls straight from where the walk left it.
+        moving.y += sin(pow(closeProgress, 0.65) * .pi) * liftHeight * (closeFromAir ? 0 : 0.6)
         moving = heldOnOwnSide(moving, of: hips, across: across, foot: foot)
 
         let arrived = closeProgress >= 1

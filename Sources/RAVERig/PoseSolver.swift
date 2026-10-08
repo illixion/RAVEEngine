@@ -215,6 +215,7 @@ public struct PoseSolver: Sendable {
                          pole: SIMD3<Float>,
                          weight: Float = 1,
                          reachLimit: Float = 0.98,
+                         heldFoot: SIMD3<Float>? = nil,
                          pose: inout [JointPose],
                          model: inout [float4x4]) -> Report {
         let joints = chain.joints
@@ -227,8 +228,11 @@ public struct PoseSolver: Sendable {
         let hip = points[0]
         let thigh = simd_length(points[1] - points[0])
         let shin = simd_length(points[2] - points[1])
-        // The digitigrade foot, held as the pose has it.
-        let foot = joints.count == 4 ? points[3] - points[2] : .zero
+        // The digitigrade foot, held as the pose has it unless the caller
+        // holds it at a fixed `heldFoot`. Read from the live pose, the foot
+        // moves with whatever the clip does to the ankle, and the knee moves
+        // with the foot: at a fixed target the knee swung by 28°.
+        let foot = joints.count == 4 ? (heldFoot ?? points[3] - points[2]) : .zero
         let ankleTarget = target - foot
 
         var toAnkle = ankleTarget - hip
