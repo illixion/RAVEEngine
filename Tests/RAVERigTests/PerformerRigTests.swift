@@ -1,0 +1,251 @@
+import Testing
+import simd
+@testable import RAVERig
+
+/// A small biped facing +Z, Y up, in metres: a spine of three, a neck and a
+/// head, and T-posed arms with a thumb and two two-joint fingers per hand,
+/// palms down. The performer stands at the origin facing −Z — the two face
+/// each other, which is exactly the mirror case — and every expectation is
+/// written in terms of whose left is where, since that is what a mirror gets
+/// wrong.
+@Suite("PerformerRig")
+struct PerformerRigTests {
+
+    // Joint indices.
+    static let hips = 0, spine = 1, chest = 2, neck = 3, head = 4
+    static let leftUpper = 5, leftFore = 6, leftHand = 7
+    static let leftIndex = [8, 9], leftMiddle = [10, 11], leftThumb = [12, 13]
+    static let rightUpper = 14, rightFore = 15, rightHand = 16
+    static let rightIndex = [17, 18], rightMiddle = [19, 20], rightThumb = [21, 22]
+
+    static func skeleton() -> PerformerRig.Skeleton {
+        func j(_ x: Float, _ y: Float, _ z: Float) -> JointPose { JointPose(translation: SIMD3(x, y, z)) }
+        // The avatar faces +Z, so its left is +X.
+        func arm(_ side: Float) -> [JointPose] {
+            [j(0.2 * side, 0.1, 0), j(0.25 * side, 0, 0), j(0.25 * side, 0, 0),
+             j(0.08 * side, 0, 0.02), j(0.03 * side, 0, 0),
+             j(0.08 * side, 0, -0.02), j(0.03 * side, 0, 0),
+             j(0.02 * side, 0, 0.04), j(0.03 * side, 0, 0.01)]
+        }
+        let rest = [j(0, 1, 0), j(0, 0.15, 0), j(0, 0.15, 0), j(0, 0.15, 0), j(0, 0.1, 0)] + arm(1) + arm(-1)
+        func armParents(_ base: Int) -> [Int?] {
+            [chest, base, base + 1, base + 2, base + 3, base + 2, base + 5, base + 2, base + 7]
+        }
+        let parents: [Int?] = [nil, 0, 1, 2, 3] + armParents(5) + armParents(14)
+        return PerformerRig.Skeleton(
+            parents: parents, rest: rest, spine: [spine, chest], neck: neck, head: head, jaw: nil,
+            leftArm: [leftUpper, leftFore, leftHand], rightArm: [rightUpper, rightFore, rightHand],
+            leftDigits: .init(thumb: leftThumb, fingers: [leftIndex, leftMiddle]),
+            rightDigits: .init(thumb: rightThumb, fingers: [rightIndex, rightMiddle]),
+            forward: SIMD3(0, 0, 1), up: SIMD3(0, 1, 0))
+    }
+
+    /// The performer faces −Z, so their left is −X.
+    static let calibration = PerformerCalibration(head: SIMD3(0, 1.6, 0), forward: SIMD3(0, 0, -1), height: 1.7)
+
+    static func level(yawDegrees: Float = 0) -> simd_quatf {
+        simd_quatf(angle: yawDegrees * .pi / 180, axis: SIMD3(0, 1, 0))
+    }
+
+    /// A flat hand at `wrist`, fingers along `along`, palm facing `palm`,
+    /// thumb toward `thumbSide`; `curl` bends every finger joint down toward
+    /// the palm by that many degrees.
+    static func hand(wrist: SIMD3<Float>, along: SIMD3<Float>, palm: SIMD3<Float>,
+                     thumbSide: SIMD3<Float>, curl: Float = 0) -> PerformerHand {
+        func finger(offset: Float) -> [SIMD3<Float>] {
+            var points = [wrist + thumbSide * offset * 0.5 + along * 0.02]
+            var cursor = wrist + thumbSide * offset + along * 0.09
+            points.append(cursor)
+            var direction = along
+            for _ in 0..<3 {
+                direction = simd_normalize(simd_quatf(angle: curl * .pi / 180, axis: simd_cross(along, palm))
+                    .act(direction))
+                cursor += direction * 0.03
+                points.append(cursor)
+            }
+            return points
+        }
+        let thumbBase = wrist + thumbSide * 0.03 + along * 0.02
+        let thumb = [thumbBase, thumbBase + (along + thumbSide) * 0.02,
+                     thumbBase + (along + thumbSide) * 0.04, thumbBase + (along + thumbSide) * 0.06]
+        return PerformerHand(wrist: wrist, thumb: thumb,
+                             fingers: [finger(offset: 0.03), finger(offset: 0.01),
+                                       finger(offset: -0.01), finger(offset: -0.03)])
+    }
+
+    static func model(_ rig: PerformerRig, _ pose: [JointPose]) -> [float4x4] {
+        PoseSolver(parents: rig.skeleton.parents).modelMatrices(of: pose)
+    }
+
+    static func forward(of joint: Int, in model: [float4x4]) -> SIMD3<Float> {
+        PoseSolver.rotation(of: model[joint]).act(SIMD3(0, 0, 1))
+    }
+
+    @Test("a performer looking straight ahead leaves the head at rest")
+    func neutralHead() throws {
+        var rig = try #require(PerformerRig(Self.skeleton()))
+        let frame = PerformerFrame(head: Self.calibration.head, headRotation: Self.level())
+        let pose = rig.solve(base: rig.skeleton.rest, frame: frame, calibration: Self.calibration,
+                             mirrored: false, deltaTime: 1 / 90)
+        let looking = Self.forward(of: Self.head, in: Self.model(rig, pose))
+        #expect(simd_distance(looking, SIMD3(0, 0, 1)) < 1e-3)
+    }
+
+    @Test("turning to the left turns the avatar to its left, and its reflection to its right")
+    func headTurnAndMirror() throws {
+        let frame = PerformerFrame(head: Self.calibration.head, headRotation: Self.level(yawDegrees: 30))
+        var rig = try #require(PerformerRig(Self.skeleton()))
+        let straight = rig.solve(base: rig.skeleton.rest, frame: frame, calibration: Self.calibration,
+                                 mirrored: false, deltaTime: 1 / 90)
+        // The avatar's left is +X: its head now looks partly that way.
+        let looking = Self.forward(of: Self.head, in: Self.model(rig, straight))
+        #expect(abs(looking.x - sin(30 * Float.pi / 180)) < 0.01)
+
+        var mirror = try #require(PerformerRig(Self.skeleton()))
+        let reflected = mirror.solve(base: mirror.skeleton.rest, frame: frame, calibration: Self.calibration,
+                                     mirrored: true, deltaTime: 1 / 90)
+        let mirrorLooking = Self.forward(of: Self.head, in: Self.model(mirror, reflected))
+        #expect(abs(mirrorLooking.x + sin(30 * Float.pi / 180)) < 0.01)
+    }
+
+    @Test("the neck takes its share of the turn")
+    func neckShare() throws {
+        let frame = PerformerFrame(head: Self.calibration.head, headRotation: Self.level(yawDegrees: 40))
+        var rig = try #require(PerformerRig(Self.skeleton()))
+        let pose = rig.solve(base: rig.skeleton.rest, frame: frame, calibration: Self.calibration,
+                             mirrored: false, deltaTime: 1 / 90)
+        let neckYaw = PoseSolver.rotation(of: Self.model(rig, pose)[Self.neck]).angle * 180 / .pi
+        #expect(neckYaw > 10 && neckYaw < 30)
+    }
+
+    /// Frames for a hand held straight out to the performer's left at
+    /// shoulder height, palm down.
+    static func leftArmOut() -> PerformerFrame {
+        // Performer's left is −X; the shoulder sits about 0.17·k out and a
+        // little under the neck.
+        let wrist = SIMD3<Float>(-0.55, 1.42, 0.05)
+        let left = hand(wrist: wrist, along: SIMD3(-1, 0, 0), palm: SIMD3(0, -1, 0), thumbSide: SIMD3(0, 0, -1))
+        return PerformerFrame(head: calibration.head, headRotation: level(), left: left)
+    }
+
+    static func solveFully(_ rig: inout PerformerRig, _ frame: PerformerFrame, mirrored: Bool) -> [JointPose] {
+        var pose = rig.skeleton.rest
+        // Long enough for the hand to ease all the way in.
+        for _ in 0..<30 {
+            pose = rig.solve(base: rig.skeleton.rest, frame: frame, calibration: calibration,
+                             mirrored: mirrored, deltaTime: 1 / 90)
+        }
+        return pose
+    }
+
+    @Test("a hand held out to the side reaches out on the avatar's same side")
+    func armReaches() throws {
+        var rig = try #require(PerformerRig(Self.skeleton()))
+        let pose = Self.solveFully(&rig, Self.leftArmOut(), mirrored: false)
+        #expect(rig.report.leftWeight == 1)
+        let model = Self.model(rig, pose)
+        let hand = PoseSolver.translation(of: model[Self.leftHand])
+        let shoulder = PoseSolver.translation(of: model[Self.leftUpper])
+        // Out along the avatar's left (+X), at about shoulder height.
+        #expect(hand.x - shoulder.x > 0.3)
+        #expect(abs(hand.y - shoulder.y) < 0.08)
+        // The right arm had no hand and stays at rest.
+        let restModel = Self.model(rig, rig.skeleton.rest)
+        #expect(simd_distance(PoseSolver.translation(of: model[Self.rightHand]),
+                              PoseSolver.translation(of: restModel[Self.rightHand])) < 1e-4)
+    }
+
+    @Test("mirrored, the performer's left hand drives the avatar's right")
+    func mirrorSwapsHands() throws {
+        var rig = try #require(PerformerRig(Self.skeleton()))
+        let pose = Self.solveFully(&rig, Self.leftArmOut(), mirrored: true)
+        #expect(rig.report.rightWeight == 1)
+        #expect(rig.report.leftWeight == 0)
+        let model = Self.model(rig, pose)
+        let hand = PoseSolver.translation(of: model[Self.rightHand])
+        let shoulder = PoseSolver.translation(of: model[Self.rightUpper])
+        // The avatar's right is −X.
+        #expect(shoulder.x - hand.x > 0.3)
+    }
+
+    @Test("a palm turned up turns the avatar's palm up")
+    func palmFollows() throws {
+        var frame = Self.leftArmOut()
+        let wrist = frame.left!.wrist
+        frame.left = Self.hand(wrist: wrist, along: SIMD3(-1, 0, 0), palm: SIMD3(0, 1, 0), thumbSide: SIMD3(0, 0, 1))
+        var rig = try #require(PerformerRig(Self.skeleton()))
+        let pose = Self.solveFully(&rig, frame, mirrored: false)
+        let model = Self.model(rig, pose)
+        // The index finger root sits on the thumb side; with the palm up, the
+        // thumb side has swung from +Z (palm down, arm along +X) to −Z.
+        let hand = PoseSolver.translation(of: model[Self.leftHand])
+        let index = PoseSolver.translation(of: model[Self.leftIndex[0]])
+        let middle = PoseSolver.translation(of: model[Self.leftMiddle[0]])
+        #expect(index.z < middle.z)
+        #expect(index.x > hand.x)
+    }
+
+    @Test("curled fingers curl the avatar's")
+    func fingersCurl() throws {
+        var frame = Self.leftArmOut()
+        let wrist = frame.left!.wrist
+        frame.left = Self.hand(wrist: wrist, along: SIMD3(-1, 0, 0), palm: SIMD3(0, -1, 0),
+                               thumbSide: SIMD3(0, 0, -1), curl: 40)
+        var rig = try #require(PerformerRig(Self.skeleton()))
+        let pose = Self.solveFully(&rig, frame, mirrored: false)
+        let model = Self.model(rig, pose)
+        // The fingertip's bone points down (−Y) toward the palm side.
+        let tipDirection = PoseSolver.rotation(of: model[Self.leftIndex[1]]).act(SIMD3(1, 0, 0))
+        #expect(tipDirection.y < -0.5)
+    }
+
+    @Test("a hand that leaves view eases back to the base pose")
+    func handEasesOut() throws {
+        var rig = try #require(PerformerRig(Self.skeleton()))
+        _ = Self.solveFully(&rig, Self.leftArmOut(), mirrored: false)
+        let gone = PerformerFrame(head: Self.calibration.head, headRotation: Self.level())
+        var pose = rig.skeleton.rest
+        for _ in 0..<60 {
+            pose = rig.solve(base: rig.skeleton.rest, frame: gone, calibration: Self.calibration,
+                             mirrored: false, deltaTime: 1 / 90)
+        }
+        #expect(rig.report.leftWeight == 0)
+        let model = Self.model(rig, pose)
+        let restModel = Self.model(rig, rig.skeleton.rest)
+        #expect(simd_distance(PoseSolver.translation(of: model[Self.leftHand]),
+                              PoseSolver.translation(of: restModel[Self.leftHand])) < 1e-4)
+    }
+
+    @Test("leaning forward bends the spine forward")
+    func leanForward() throws {
+        var rig = try #require(PerformerRig(Self.skeleton()))
+        // Head 15 cm further toward −Z (the performer's forward) and a little lower.
+        let frame = PerformerFrame(head: Self.calibration.head + SIMD3(0, -0.03, -0.15), headRotation: Self.level())
+        let pose = rig.solve(base: rig.skeleton.rest, frame: frame, calibration: Self.calibration,
+                             mirrored: false, deltaTime: 1 / 90)
+        #expect(rig.report.leanDegrees > 5)
+        let model = Self.model(rig, pose)
+        // The avatar's forward is +Z: the chest has moved that way.
+        #expect(PoseSolver.translation(of: model[Self.neck]).z > 0.03)
+    }
+
+    @Test("the palm frame is right-handed and matches its inputs")
+    func palmFrame() throws {
+        let frame = try #require(PerformerRig.palmFrame(
+            base: .zero, fingerRoots: [SIMD3(0.1, 0, 0.02), SIMD3(0.1, 0, -0.02)], thumbRoot: nil))
+        let m = float3x3(frame)
+        #expect(abs(simd_determinant(m) - 1) < 1e-4)
+        #expect(simd_distance(m.columns.2, SIMD3(1, 0, 0)) < 1e-4)
+        #expect(simd_distance(m.columns.0, SIMD3(0, 0, 1)) < 1e-4)
+    }
+
+    @Test("the 1€ filter passes a still point and follows a moving one")
+    func oneEuro() {
+        var filter = OneEuroFilter()
+        var out = SIMD3<Float>.zero
+        for _ in 0..<10 { out = filter.filter(SIMD3(1, 1, 1), deltaTime: 1 / 90) }
+        #expect(simd_distance(out, SIMD3(1, 1, 1)) < 1e-5)
+        for i in 0..<90 { out = filter.filter(SIMD3(1 + Float(i) / 90, 1, 1), deltaTime: 1 / 90) }
+        #expect(abs(out.x - 2) < 0.05)
+    }
+}
