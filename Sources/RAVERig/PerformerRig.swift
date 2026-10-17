@@ -109,7 +109,8 @@ public struct PerformerCalibration: Sendable, Equatable {
 /// - **Digits** point along the performer's: each avatar digit follows the
 ///   performer digits it stands for, averaged — a three-fingered paw's outer
 ///   finger follows the middle, ring and little fingers together — matched
-///   from the tip back, so digits with fewer joints still curl at the end.
+///   from the knuckle out, a metacarpal inside the palm recognised by where
+///   it sits, so the bend lands at the knuckle on any rig.
 /// - **Jaw** opens by a caller-supplied amount (the voice, say).
 /// - **Legs and hips** stay whatever the base pose gives them.
 ///
@@ -224,6 +225,9 @@ public struct PerformerRig: Sendable {
     /// Per digit joint, the bone's direction in the joint's own space, for
     /// the last joint of a chain, which has no child to measure to.
     private let boneAxis: [Int: SIMD3<Float>]
+    /// Finger chains (by root) whose first joint sits inside the palm — a
+    /// metacarpal — so the knuckle bend belongs to the second.
+    private let metacarpals: Set<Int>
     private let jawAxisSign: Float
     private var weights: (left: Float, right: Float) = (0, 0)
 
@@ -253,8 +257,26 @@ public struct PerformerRig: Sendable {
         }
         armLength = (reach(skeleton.leftArm) + reach(skeleton.rightArm)) / 2
 
+        // A finger whose first joint is much nearer the wrist than its
+        // second starts with a metacarpal: VRChat rigs such as the Synth carry
+        // one (`Index_Base`, 5 cm from the wrist, then `Index_1` at the
+        // knuckle 13 cm out); Mixamo's start at the knuckle. Matched from the
+        // tip without knowing that, every joint took the bone one further
+        // along, and a curl folded the palm.
+        var inPalm: Set<Int> = []
+        for (hand, digits) in [(skeleton.leftArm.last!, skeleton.leftDigits),
+                               (skeleton.rightArm.last!, skeleton.rightDigits)] {
+            for chain in digits?.fingers ?? [] where chain.count >= 2 {
+                let root = simd_distance(position(hand), position(chain[0]))
+                let next = simd_distance(position(hand), position(chain[1]))
+                if next > 1e-6, root / next < 0.55 { inPalm.insert(chain[0]) }
+            }
+        }
+        metacarpals = inPalm
+
         func palm(hand: Int, digits: Digits?) -> simd_quatf? {
-            guard let digits, let frame = Self.avatarPalm(digits: digits, hand: hand, position: position) else {
+            guard let digits, let frame = Self.avatarPalm(digits: digits, hand: hand, metacarpals: inPalm,
+                                                          position: position) else {
                 return nil
             }
             return simd_normalize(PoseSolver.rotation(of: model[hand]).inverse * frame)
@@ -560,10 +582,15 @@ public struct PerformerRig: Sendable {
         return simd_normalize(simd_quatf(float3x3(a, n, l)))
     }
 
-    private static func avatarPalm(digits: Digits, hand: Int,
+    /// Built from the knuckles, as the performer's is: a metacarpal's root
+    /// sits in the wrist and says little about where the palm points.
+    private static func avatarPalm(digits: Digits, hand: Int, metacarpals: Set<Int>,
                                    position: (Int) -> SIMD3<Float>) -> simd_quatf? {
-        palmFrame(base: position(hand), fingerRoots: digits.fingers.compactMap { $0.first.map(position) },
-                  thumbRoot: digits.thumb?.first.map(position))
+        let knuckles = digits.fingers.compactMap { chain -> SIMD3<Float>? in
+            guard let root = chain.first else { return nil }
+            return position(metacarpals.contains(root) && chain.count >= 2 ? chain[1] : root)
+        }
+        return palmFrame(base: position(hand), fingerRoots: knuckles, thumbRoot: digits.thumb?.first.map(position))
     }
 
     /// The performer's palm in model space, built from the knuckles of the
@@ -585,32 +612,69 @@ public struct PerformerRig: Sendable {
     private func pointDigits(_ digits: Digits, along hand: PerformerHand,
                              toModel: (SIMD3<Float>) -> SIMD3<Float>, weight: Float,
                              pose: inout [JointPose], model: inout [float4x4]) {
-        func bones(_ points: [SIMD3<Float>]) -> [SIMD3<Float>] {
-            zip(points, points.dropFirst()).map { simd_normalize(toModel($1 - $0)) }
+        func direction(_ points: [SIMD3<Float>], _ bone: (Int, Int)) -> SIMD3<Float>? {
+            guard bone.1 < points.count else { return nil }
+            let v = toModel(points[bone.1] - points[bone.0])
+            return simd_length(v) > 1e-7 ? simd_normalize(v) : nil
         }
         if let thumb = digits.thumb {
-            point(thumb, along: bones(hand.thumb), weight: weight, pose: &pose, model: &model)
+            let bones = Self.thumbBones(joints: thumb.count)
+            point(thumb, along: bones.map { $0.flatMap { direction(hand.thumb, $0) } },
+                  weight: weight, pose: &pose, model: &model)
         }
         let groups = Self.fingerGroups(avatarFingers: digits.fingers.count)
         for (chain, group) in zip(digits.fingers, groups) {
-            let each = group.filter { $0 < hand.fingers.count }.map { bones(hand.fingers[$0]) }
-            guard let count = each.first?.count else { continue }
-            let averaged = (0..<count).map { b in
-                let sum = each.reduce(SIMD3<Float>.zero) { $0 + $1[b] }
-                return simd_length(sum) > 1e-6 ? simd_normalize(sum) : each[0][b]
+            let bones = Self.fingerBones(joints: chain.count,
+                                         metacarpal: chain.first.map(metacarpals.contains) ?? false)
+            let sources = group.filter { $0 < hand.fingers.count }.map { hand.fingers[$0] }
+            // Each avatar bone along the mean of the performer bones it stands
+            // for.
+            let wanted = bones.map { bone -> SIMD3<Float>? in
+                guard let bone else { return nil }
+                let sum = sources.compactMap { direction($0, bone) }.reduce(SIMD3<Float>.zero, +)
+                return simd_length(sum) > 1e-6 ? simd_normalize(sum) : nil
             }
-            point(chain, along: averaged, weight: weight, pose: &pose, model: &model)
+            point(chain, along: wanted, weight: weight, pose: &pose, model: &model)
         }
     }
 
-    /// Points each joint of `chain` along its bone, matched from the tip.
-    private func point(_ chain: [Int], along bones: [SIMD3<Float>], weight: Float,
+    /// Which performer bone each avatar finger joint follows, as indices into
+    /// a finger's points (metacarpal base 0, knuckle 1, the two finger joints
+    /// 2 and 3, tip 4), or nil to leave a joint as the base pose has it.
+    ///
+    /// Matched from the knuckle out, so the bend lands at the knuckle on any
+    /// rig. A finger with fewer phalanges than a hand takes the chord of the
+    /// ones it lacks: two phalanges are knuckle-to-middle and middle-to-tip.
+    static func fingerBones(joints: Int, metacarpal: Bool) -> [(Int, Int)?] {
+        func phalanges(_ n: Int) -> [(Int, Int)?] {
+            switch n {
+            case ..<1: []
+            case 1: [(1, 4)]
+            case 2: [(1, 2), (2, 4)]
+            default: Array(repeating: nil, count: n - 3) + [(1, 2), (2, 3), (3, 4)]
+            }
+        }
+        return metacarpal && joints >= 2 ? [(0, 1)] + phalanges(joints - 1) : phalanges(joints)
+    }
+
+    /// The thumb's version: its points are the base (0), the two knuckles and
+    /// the tip (3), and an avatar thumb's first joint is always its
+    /// metacarpal, on every rig seen so far.
+    static func thumbBones(joints: Int) -> [(Int, Int)?] {
+        switch joints {
+        case ..<1: []
+        case 1: [(0, 3)]
+        case 2: [(0, 1), (1, 3)]
+        default: Array(repeating: nil, count: joints - 3) + [(0, 1), (1, 2), (2, 3)]
+        }
+    }
+
+    /// Points each joint of `chain` along its wanted bone direction, root
+    /// first; a nil direction leaves that joint as it is.
+    private func point(_ chain: [Int], along wanted: [SIMD3<Float>?], weight: Float,
                        pose: inout [JointPose], model: inout [float4x4]) {
-        let n = min(chain.count, bones.count)
-        guard n > 0 else { return }
-        let firstDriven = chain.count - n
-        for (offset, joint) in chain.enumerated() where offset >= firstDriven {
-            let wanted = bones[bones.count - (chain.count - offset)]
+        for (offset, joint) in chain.enumerated() {
+            guard offset < wanted.count, let target = wanted[offset] else { continue }
             let here = currentModel(joint, pose: pose, model: model)
             let origin = PoseSolver.translation(of: here)
             let now: SIMD3<Float>
@@ -623,7 +687,7 @@ public struct PerformerRig: Sendable {
                 continue
             }
             guard simd_length(now) > 1e-7 else { continue }
-            var rotation = PoseSolver.rotation(from: simd_normalize(now), to: wanted)
+            var rotation = PoseSolver.rotation(from: simd_normalize(now), to: target)
             if weight < 0.999 { rotation = simd_slerp(Self.identity, rotation, weight) }
             set(joint, modelRotation: rotation * PoseSolver.rotation(of: here), pose: &pose, model: &model)
         }

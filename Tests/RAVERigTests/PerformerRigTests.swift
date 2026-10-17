@@ -18,14 +18,17 @@ struct PerformerRigTests {
     static let rightUpper = 14, rightFore = 15, rightHand = 16
     static let rightIndex = [17, 18], rightMiddle = [19, 20], rightThumb = [21, 22]
 
-    static func skeleton() -> PerformerRig.Skeleton {
+    /// `metacarpals` starts each finger inside the palm, the way the Synth's
+    /// do, with the knuckle at its second joint.
+    static func skeleton(metacarpals: Bool = false) -> PerformerRig.Skeleton {
         func j(_ x: Float, _ y: Float, _ z: Float) -> JointPose { JointPose(translation: SIMD3(x, y, z)) }
         // The avatar faces +Z, so its left is +X.
         func arm(_ side: Float) -> [JointPose] {
-            [j(0.2 * side, 0.1, 0), j(0.25 * side, 0, 0), j(0.25 * side, 0, 0),
-             j(0.08 * side, 0, 0.02), j(0.03 * side, 0, 0),
-             j(0.08 * side, 0, -0.02), j(0.03 * side, 0, 0),
-             j(0.02 * side, 0, 0.04), j(0.03 * side, 0, 0.01)]
+            let (root, next): (Float, Float) = metacarpals ? (0.03, 0.06) : (0.08, 0.03)
+            return [j(0.2 * side, 0.1, 0), j(0.25 * side, 0, 0), j(0.25 * side, 0, 0),
+                    j(root * side, 0, 0.02), j(next * side, 0, 0),
+                    j(root * side, 0, -0.02), j(next * side, 0, 0),
+                    j(0.02 * side, 0, 0.04), j(0.03 * side, 0, 0.01)]
         }
         let rest = [j(0, 1, 0), j(0, 0.15, 0), j(0, 0.15, 0), j(0, 0.15, 0), j(0, 0.1, 0)] + arm(1) + arm(-1)
         func armParents(_ base: Int) -> [Int?] {
@@ -197,6 +200,37 @@ struct PerformerRigTests {
         // The fingertip's bone points down (−Y) toward the palm side.
         let tipDirection = PoseSolver.rotation(of: model[Self.leftIndex[1]]).act(SIMD3(1, 0, 0))
         #expect(tipDirection.y < -0.5)
+    }
+
+    @Test("a finger starting inside the palm bends at the knuckle, not in the palm")
+    func metacarpalStaysInThePalm() throws {
+        var frame = Self.leftArmOut()
+        let wrist = frame.left!.wrist
+        frame.left = Self.hand(wrist: wrist, along: SIMD3(-1, 0, 0), palm: SIMD3(0, -1, 0),
+                               thumbSide: SIMD3(0, 0, -1), curl: 40)
+        var rig = try #require(PerformerRig(Self.skeleton(metacarpals: true)))
+        let pose = Self.solveFully(&rig, frame, mirrored: false)
+        let model = Self.model(rig, pose)
+        func bone(_ from: Int, _ to: Int) -> SIMD3<Float> {
+            simd_normalize(PoseSolver.translation(of: model[to]) - PoseSolver.translation(of: model[from]))
+        }
+        // The metacarpal keeps to the palm, out along the arm...
+        let palm = bone(Self.leftIndex[0], Self.leftIndex[1])
+        #expect(abs(palm.y) < 0.15)
+        #expect(palm.x > 0.9)
+        // ...and the finger bends down from the knuckle.
+        let finger = PoseSolver.rotation(of: model[Self.leftIndex[1]]).act(SIMD3(1, 0, 0))
+        #expect(finger.y < -0.4)
+    }
+
+    @Test("bones are matched from the knuckle on any finger")
+    func fingerBoneMatching() {
+        #expect(PerformerRig.fingerBones(joints: 3, metacarpal: true).map { $0?.0 } == [0, 1, 2])
+        #expect(PerformerRig.fingerBones(joints: 3, metacarpal: true).map { $0?.1 } == [1, 2, 4])
+        #expect(PerformerRig.fingerBones(joints: 3, metacarpal: false).map { $0?.0 } == [1, 2, 3])
+        #expect(PerformerRig.fingerBones(joints: 4, metacarpal: true).map { $0?.0 } == [0, 1, 2, 3])
+        #expect(PerformerRig.fingerBones(joints: 5, metacarpal: false).map { $0?.0 } == [nil, nil, 1, 2, 3])
+        #expect(PerformerRig.thumbBones(joints: 3).map { $0?.0 } == [0, 1, 2])
     }
 
     @Test("a hand that leaves view eases back to the base pose")
