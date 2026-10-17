@@ -238,14 +238,27 @@ public struct PerformerRig: Sendable {
         /// speed of it, m/s) moves with it; otherwise it coasts on its own.
         public var togetherSpeed: Float = 0.25
         /// A hand lost while this close to straight ahead can't have left the
-        /// view that fast, so something is in front of it.
-        public var inViewAngle: Float = 35 * .pi / 180
+        /// view that fast, so something is in front of it. The headset tracks
+        /// hands well past this, below the eyes especially: 35° caught hands
+        /// waved in front of the chest as leaving.
+        public var inViewAngle: Float = 55 * .pi / 180
         /// How long such a hand is held before it starts to fade.
         public var inViewHold: Float = 3
         /// A lost hand keeps moving the way it was going, slowing over this
-        /// time constant, seconds: a hand waved past the other comes out of
-        /// hiding about where it went in, not where it was last seen.
-        public var coastTime: Float = 0.25
+        /// time constant, seconds, and no faster than `coastSpeed` (m/s): a
+        /// hand waved past the other comes out of hiding about where it went
+        /// in, and one that reverses mid-wave doesn't overshoot far.
+        public var coastTime: Float = 0.15
+        public var coastSpeed: Float = 1.2
+        /// The other hand counts as there for spotting a hidden one for this
+        /// long after it is lost itself: hands crossing each other vanish
+        /// within a few frames of one another.
+        public var partnerMemory: Float = 0.25
+        /// How long a forearm point that blinks out under a tracked hand is
+        /// kept, riding the hand's own orientation, seconds. A flat hand at
+        /// eye level puts the forearm across the face, where the tracker
+        /// keeps losing it, and the elbow jiggled between it and the default.
+        public var forearmHold: Float = 1
         /// How quickly a hand that comes back after a loss moves from where
         /// it was bridged to where it is, seconds, and for how long after its
         /// return that easing applies.
@@ -313,6 +326,10 @@ public struct PerformerRig: Sendable {
         var lastWrist: SIMD3<Float>?
         /// How it is being posed, for the report.
         var bridge = "none"
+        /// The forearm point in the hand's own frame, and how long since it
+        /// was last tracked.
+        var forearmLocal: SIMD3<Float>?
+        var forearmAge: Float = 0
         /// What was posed last frame, which a returning hand eases from.
         var posed: PerformerHand?
         var sinceReturn: Float = .infinity
@@ -448,9 +465,19 @@ public struct PerformerRig: Sendable {
         /// the other moves with that one for `occludedHold`; one lost in plain
         /// view is held a little longer; then it fades rather than drops. A
         /// hand that comes back eases from where it was bridged.
-        func resolve(_ hand: PerformerHand?, partner: PerformerHand?, partnerVelocity: SIMD3<Float>,
+        func resolve(_ hand: PerformerHand?, partner live: PerformerHand?, partnerState: HandState,
                      state: inout HandState) -> PerformerHand? {
-            if let hand, hand.isComplete {
+            if var hand, hand.isComplete {
+                let handFrame = Self.palmFrame(base: hand.wrist, fingerRoots: (0..<4).compactMap { hand.knuckle($0) },
+                                               thumbRoot: hand.thumb.first)
+                if let forearm = hand.forearm, let handFrame {
+                    state.forearmLocal = handFrame.inverse.act(forearm - hand.wrist)
+                    state.forearmAge = 0
+                } else if hand.forearm == nil, let local = state.forearmLocal, let handFrame,
+                          state.forearmAge < tuning.forearmHold {
+                    state.forearmAge += deltaTime
+                    hand.forearm = hand.wrist + handFrame.act(local)
+                }
                 if state.lost > 0 { state.sinceReturn = 0 }
                 if let last = state.lastWrist, deltaTime > 0 {
                     let velocity = (hand.wrist - last) / deltaTime
@@ -473,21 +500,28 @@ public struct PerformerRig: Sendable {
                 state.posed = out
                 return out
             }
-            let partner = partner.flatMap { $0.isComplete ? $0 : nil }
+            let partner = live.flatMap { $0.isComplete ? $0 : nil }
+            // For spotting a hidden hand, the other one as last seen will do
+            // if it went only a moment ago.
+            let partnerSeen = partner ?? (partnerState.lost < tuning.partnerMemory ? partnerState.held : nil)
             state.lastWrist = nil
             if state.lost == 0, let held = state.held {
                 // Just lost: how long to bridge it depends on why it went.
                 state.hold = tuning.handHold
                 state.bridge = "blink"
-                if let head = frame?.head, let partner {
-                    let points = [partner.wrist] + (partner.forearm.map { [$0] } ?? []) + partner.thumb
-                        + partner.fingers.flatMap { $0 }
+                let speed = simd_length(state.velocity)
+                if speed > tuning.coastSpeed { state.velocity *= tuning.coastSpeed / speed }
+                if let head = frame?.head, let other = partnerSeen {
+                    let points = [other.wrist] + (other.forearm.map { [$0] } ?? []) + other.thumb
+                        + other.fingers.flatMap { $0 }
                     let nearest = points.map { angle(held.wrist - head, $0 - head) }.min() ?? .pi
-                    let apart = simd_distance(held.wrist, partner.wrist)
+                    let apart = simd_distance(held.wrist, other.wrist)
                     if nearest < tuning.occlusionAngle || apart < tuning.hiddenDistance {
                         state.hold = tuning.occludedHold
-                        let together = simd_length(state.velocity - partnerVelocity) < tuning.togetherSpeed
-                        if together { state.partner = partner.wrist }
+                        // Riding needs the other hand in view to ride on.
+                        let together = partner != nil
+                            && simd_length(state.velocity - partnerState.velocity) < tuning.togetherSpeed
+                        if together, let partner { state.partner = partner.wrist }
                         state.bridge = String(format: "hidden %.0f° %.2fm %@", nearest * 180 / .pi, apart,
                                               together ? "riding" : "coasting")
                     }
@@ -523,9 +557,9 @@ public struct PerformerRig: Sendable {
             state.posed = state.held
             return state.held
         }
-        let posedHands = (left: resolve(live.left, partner: live.right, partnerVelocity: hands.right.velocity,
+        let posedHands = (left: resolve(live.left, partner: live.right, partnerState: hands.right,
                                         state: &hands.left),
-                          right: resolve(live.right, partner: live.left, partnerVelocity: hands.left.velocity,
+                          right: resolve(live.right, partner: live.left, partnerState: hands.left,
                                          state: &hands.right))
         report.leftWeight = hands.left.weight
         report.rightWeight = hands.right.weight

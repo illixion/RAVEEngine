@@ -388,6 +388,56 @@ struct PerformerRigTests {
         #expect(after.x < before.x - 0.02)
     }
 
+    /// A flat hand at eye level puts the forearm across the face, where the
+    /// tracker keeps losing that one point while the hand stays tracked.
+    /// The elbow must stay where the forearm last put it, not drop to the
+    /// default bend every other frame.
+    @Test func aForearmThatBlinksOutKeepsTheElbow() throws {
+        var rig = try #require(PerformerRig(Self.skeleton()))
+        let head = Self.calibration.head
+        // Left hand flat in front of the face, forearm running out to the
+        // performer's left, so the elbow is out to the side, not down.
+        var hand = Self.hand(wrist: head + SIMD3(-0.05, -0.02, -0.3), along: SIMD3(1, 0, 0), palm: SIMD3(0, -1, 0),
+                             thumbSide: SIMD3(0, 0, -1))
+        hand.forearm = hand.wrist + SIMD3(-0.24, 0, 0.05)
+        let with = PerformerFrame(head: head, headRotation: Self.level(), left: hand)
+        let tracked = Self.solveFully(&rig, with, mirrored: false)
+        let elbow = PoseSolver.translation(of: Self.model(rig, tracked)[Self.leftFore])
+        var bare = hand
+        bare.forearm = nil
+        let without = PerformerFrame(head: head, headRotation: Self.level(), left: bare)
+        var pose = tracked
+        for _ in 0..<20 {
+            pose = rig.solve(base: rig.skeleton.rest, frame: without, calibration: Self.calibration,
+                             mirrored: false, deltaTime: 1 / 90)
+        }
+        let after = PoseSolver.translation(of: Self.model(rig, pose)[Self.leftFore])
+        #expect(simd_distance(elbow, after) < 0.02)
+    }
+
+    /// Hands crossing in front often vanish within a frame or two of each
+    /// other, so neither is in view when the other is lost. Both still count
+    /// as hidden, not as a blink that fades to idle.
+    @Test func handsLostTogetherWhileCrossingAreBothHidden() throws {
+        var rig = try #require(PerformerRig(Self.skeleton()))
+        let head = Self.calibration.head
+        let left = Self.hand(wrist: head + SIMD3(0.02, -0.4, -0.4), along: SIMD3(0, 0, -1), palm: SIMD3(0, -1, 0),
+                             thumbSide: SIMD3(1, 0, 0))
+        let right = Self.hand(wrist: head + SIMD3(-0.02, -0.35, -0.3), along: SIMD3(0, 0, -1), palm: SIMD3(0, -1, 0),
+                              thumbSide: SIMD3(-1, 0, 0))
+        _ = Self.solveFully(&rig, PerformerFrame(head: head, headRotation: Self.level(), left: left, right: right),
+                            mirrored: false)
+        let gone = PerformerFrame(head: head, headRotation: Self.level())
+        for _ in 0..<90 {
+            _ = rig.solve(base: rig.skeleton.rest, frame: gone, calibration: Self.calibration,
+                          mirrored: false, deltaTime: 1 / 90)
+        }
+        #expect(rig.report.leftBridge.hasPrefix("hidden"))
+        #expect(rig.report.rightBridge.hasPrefix("hidden"))
+        #expect(rig.report.leftWeight == 1)
+        #expect(rig.report.rightWeight == 1)
+    }
+
     /// A hand that comes back after a loss eases from where it was bridged
     /// rather than jumping to where tracking now puts it.
     @Test func aReturningHandEasesBack() throws {
