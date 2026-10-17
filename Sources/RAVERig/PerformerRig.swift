@@ -192,6 +192,11 @@ public struct PerformerRig: Sendable {
         /// Seconds to ease a hand in when it appears, and out when it goes.
         public var handFadeIn: Float = 0.15
         public var handFadeOut: Float = 0.5
+        /// How long a hand that drops out of tracking is held where it was
+        /// last seen before it starts to fade. Hand tracking blinks out for a
+        /// few frames all the time — a hand turned edge-on, fingers crossing —
+        /// and dropping to the base pose for each blink reads as flicker.
+        public var handHold: Float = 0.35
         /// Share of the wrist's twist the forearm takes.
         public var forearmTwistShare: Float = 0.5
         public init() {}
@@ -230,6 +235,10 @@ public struct PerformerRig: Sendable {
     private let metacarpals: Set<Int>
     private let jawAxisSign: Float
     private var weights: (left: Float, right: Float) = (0, 0)
+    /// Each avatar hand's last tracked performer hand, and how long it has
+    /// been gone: what a dropout holds, and what a real loss fades from.
+    private var held: (left: PerformerHand?, right: PerformerHand?) = (nil, nil)
+    private var lost: (left: Float, right: Float) = (0, 0)
 
     public init?(_ skeleton: Skeleton) {
         let count = skeleton.rest.count
@@ -314,6 +323,8 @@ public struct PerformerRig: Sendable {
     /// Clears the hand weights, so the next solve eases in from the base pose.
     public mutating func reset() {
         weights = (0, 0)
+        held = (nil, nil)
+        lost = (0, 0)
     }
 
     // MARK: - Solving
@@ -347,15 +358,31 @@ public struct PerformerRig: Sendable {
         }
 
         let k = calibration.height / 1.70
-        let hands: (left: PerformerHand?, right: PerformerHand?) = mirrored
+        let live: (left: PerformerHand?, right: PerformerHand?) = mirrored
             ? (frame?.right, frame?.left) : (frame?.left, frame?.right)
         func ease(_ current: Float, tracked: Bool) -> Float {
             let seconds = tracked ? tuning.handFadeIn : tuning.handFadeOut
             let step = seconds > 0 ? deltaTime / seconds : 1
             return tracked ? min(1, current + step) : max(0, current - step)
         }
-        weights.left = ease(weights.left, tracked: hands.left?.isComplete == true)
-        weights.right = ease(weights.right, tracked: hands.right?.isComplete == true)
+        /// The hand to pose this frame and whether it counts as tracked: the
+        /// live one, or the last one seen — held at full weight through a
+        /// short dropout, then faded from rather than dropped.
+        func resolve(_ hand: PerformerHand?, held: inout PerformerHand?, lost: inout Float,
+                     weight: inout Float) -> PerformerHand? {
+            if let hand, hand.isComplete {
+                held = hand
+                lost = 0
+                weight = ease(weight, tracked: true)
+                return hand
+            }
+            lost += deltaTime
+            weight = ease(weight, tracked: lost < tuning.handHold && held != nil)
+            if weight <= 0 { held = nil }
+            return held
+        }
+        let hands = (left: resolve(live.left, held: &held.left, lost: &lost.left, weight: &weights.left),
+                     right: resolve(live.right, held: &held.right, lost: &lost.right, weight: &weights.right))
         report.leftWeight = weights.left
         report.rightWeight = weights.right
 
@@ -758,17 +785,23 @@ public struct OneEuroFilter: Sendable {
 }
 
 /// Smooths whole performer frames: every hand point through its own 1€
-/// filter, the head through a light one. A hand that leaves view resets its
-/// filters, so it comes back where it is, not gliding from where it went.
+/// filter, the head through a light one. A hand gone longer than a tracking
+/// blink resets its filters, so it comes back where it is, not gliding from
+/// where it went; one that blinks keeps them, and picks up where it left off.
 public struct PerformerSmoothing: Sendable {
     private var head = OneEuroFilter(minCutoff: 2.5, beta: 4)
     private var hands: [[OneEuroFilter]] = [[], []]
+    private var missing: [Float] = [0, 0]
+    /// Longer than `PerformerRig.Tuning.handHold`: a hand still held is still
+    /// the same hand.
+    public var forgetAfter: Float = 0.5
 
     public init() {}
 
     public mutating func reset() {
         head.reset()
         hands = [[], []]
+        missing = [0, 0]
     }
 
     public mutating func smooth(_ frame: PerformerFrame, deltaTime: Float) -> PerformerFrame {
@@ -781,9 +814,11 @@ public struct PerformerSmoothing: Sendable {
 
     private mutating func smooth(_ hand: PerformerHand?, slot: Int, deltaTime: Float) -> PerformerHand? {
         guard var hand else {
-            hands[slot] = []
+            missing[slot] += deltaTime
+            if missing[slot] > forgetAfter { hands[slot] = [] }
             return nil
         }
+        missing[slot] = 0
         var points = [hand.wrist] + hand.thumb + hand.fingers.flatMap { $0 }
         if let forearm = hand.forearm { points.append(forearm) }
         if hands[slot].count != points.count {

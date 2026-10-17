@@ -239,7 +239,8 @@ struct PerformerRigTests {
         _ = Self.solveFully(&rig, Self.leftArmOut(), mirrored: false)
         let gone = PerformerFrame(head: Self.calibration.head, headRotation: Self.level())
         var pose = rig.skeleton.rest
-        for _ in 0..<60 {
+        // Held for `handHold`, then faded over `handFadeOut`.
+        for _ in 0..<120 {
             pose = rig.solve(base: rig.skeleton.rest, frame: gone, calibration: Self.calibration,
                              mirrored: false, deltaTime: 1 / 90)
         }
@@ -248,6 +249,23 @@ struct PerformerRigTests {
         let restModel = Self.model(rig, rig.skeleton.rest)
         #expect(simd_distance(PoseSolver.translation(of: model[Self.leftHand]),
                               PoseSolver.translation(of: restModel[Self.leftHand])) < 1e-4)
+    }
+
+    @Test("a hand that blinks out of tracking holds where it was")
+    func dropoutHolds() throws {
+        var rig = try #require(PerformerRig(Self.skeleton()))
+        let tracked = Self.solveFully(&rig, Self.leftArmOut(), mirrored: false)
+        let before = PoseSolver.translation(of: Self.model(rig, tracked)[Self.leftHand])
+        let gone = PerformerFrame(head: Self.calibration.head, headRotation: Self.level())
+        var pose = tracked
+        // Six frames at 90 Hz: a hand turned edge-on.
+        for _ in 0..<6 {
+            pose = rig.solve(base: rig.skeleton.rest, frame: gone, calibration: Self.calibration,
+                             mirrored: false, deltaTime: 1 / 90)
+        }
+        #expect(rig.report.leftWeight == 1)
+        let during = PoseSolver.translation(of: Self.model(rig, pose)[Self.leftHand])
+        #expect(simd_distance(before, during) < 1e-3)
     }
 
     @Test("leaning forward bends the spine forward")
