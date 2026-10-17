@@ -101,6 +101,32 @@ struct PerformerRigTests {
         #expect(chin(mouthOpen: 1) < chin(mouthOpen: 0) - 0.01)
     }
 
+    /// A performer's nearly straight arm puts the forearm-derived elbow a
+    /// few millimetres off the shoulder-to-hand line, on whichever side the
+    /// tracking noise says. The avatar's arm is shorter and still bent, and
+    /// its elbow must not swing around the line with that noise.
+    @Test func aNearlyStraightArmDoesNotFlipTheElbow() throws {
+        // Where the rig estimates the performer's left shoulder for this
+        // calibration: the neck below and behind the eyes, 17 cm out.
+        let shoulder = SIMD3<Float>(-0.17, 1.39, 0.08)
+        let wrist = shoulder + SIMD3<Float>(-0.25, -0.15, -0.2)
+        let back = simd_normalize(shoulder - wrist)
+        let across = simd_normalize(simd_cross(back, SIMD3<Float>(0, 1, 0)))
+        func elbow(noise: Float) throws -> SIMD3<Float> {
+            var rig = try #require(PerformerRig(Self.skeleton()))
+            var hand = Self.hand(wrist: wrist, along: SIMD3(-1, 0, 0), palm: SIMD3(0, -1, 0),
+                                 thumbSide: SIMD3(0, 0, -1))
+            hand.forearm = wrist + back * 0.1 + across * noise
+            let frame = PerformerFrame(head: Self.calibration.head, headRotation: Self.level(), left: hand)
+            let pose = rig.solve(base: Self.skeleton().rest, frame: frame, calibration: Self.calibration,
+                                 mirrored: false, mouthOpen: 0, deltaTime: 1)
+            let m = Self.model(rig, pose)[Self.leftFore]
+            return SIMD3(m.columns.3.x, m.columns.3.y, m.columns.3.z)
+        }
+        let one = try elbow(noise: 0.002), other = try elbow(noise: -0.002)
+        #expect(simd_distance(one, other) < 0.06)
+    }
+
     static func model(_ rig: PerformerRig, _ pose: [JointPose]) -> [float4x4] {
         PoseSolver(parents: rig.skeleton.parents).modelMatrices(of: pose)
     }

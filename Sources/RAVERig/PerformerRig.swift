@@ -199,6 +199,13 @@ public struct PerformerRig: Sendable {
         public var handHold: Float = 0.35
         /// Share of the wrist's twist the forearm takes.
         public var forearmTwistShare: Float = 0.5
+        /// How strongly the elbow bends out, down and back when the tracked
+        /// forearm doesn't say otherwise, in metres off the shoulder-to-hand
+        /// line. A forearm-derived elbow further off the line than this
+        /// decides the bend; a nearly straight arm falls back to this one.
+        public var elbowDefaultBend: Float = 0.05
+        /// How quickly the elbow's bend direction follows, seconds.
+        public var elbowSmoothing: Float = 0.08
         public init() {}
     }
 
@@ -239,6 +246,8 @@ public struct PerformerRig: Sendable {
     /// been gone: what a dropout holds, and what a real loss fades from.
     private var held: (left: PerformerHand?, right: PerformerHand?) = (nil, nil)
     private var lost: (left: Float, right: Float) = (0, 0)
+    /// Each avatar elbow's eased bend direction, off its shoulder-to-hand line.
+    private var elbowBends: (left: SIMD3<Float>?, right: SIMD3<Float>?) = (nil, nil)
 
     public init?(_ skeleton: Skeleton) {
         let count = skeleton.rest.count
@@ -321,6 +330,7 @@ public struct PerformerRig: Sendable {
         weights = (0, 0)
         held = (nil, nil)
         lost = (0, 0)
+        elbowBends = (nil, nil)
     }
 
     // MARK: - Solving
@@ -456,7 +466,10 @@ public struct PerformerRig: Sendable {
         for side in [Side.left, .right] {
             let weight = side == .left ? weights.left : weights.right
             guard weight > 0.001, let hand = side == .left ? hands.left : hands.right,
-                  let shoulders else { continue }
+                  let shoulders else {
+                if side == .left { elbowBends.left = nil } else { elbowBends.right = nil }
+                continue
+            }
             // Mirrored, the avatar's left hand is the performer's right, so it
             // is measured from the performer's right shoulder.
             let performerShoulder = (side == .left) != mirrored ? shoulders.left : shoulders.right
@@ -465,17 +478,30 @@ public struct PerformerRig: Sendable {
             let shoulderModel = PoseSolver.translation(of: model[upper])
             let target = shoulderModel + toModel(hand.wrist - performerShoulder) * scale
 
-            // The elbow goes where the forearm points back to; without a
-            // forearm, out, down and a little back.
-            var pole: SIMD3<Float>
+            // The elbow bends toward where the performer's is: the forearm
+            // points back to it. Only the part of that off the shoulder-to-
+            // hand line says which way, and near a straight arm it is a few
+            // millimetres of tracking noise. Normalised, it swung the avatar's
+            // elbow (still bent: its arm is another length) from one side of
+            // the line to the other as the hand moved a centimetre. So it is
+            // weighed by its size against a default bend, out, down and a
+            // little back, which carries a straight arm, and eased over time.
+            let reach = target - shoulderModel
+            let line = simd_length(reach) > 1e-4 ? simd_normalize(reach) : avatarFrame.act(SIMD3<Float>(0, -1, 0))
+            func offLine(_ v: SIMD3<Float>) -> SIMD3<Float> { v - simd_dot(v, line) * line }
+            let out: Float = side == .left ? 1 : -1
+            var bend = offLine(avatarFrame.act(simd_normalize(SIMD3<Float>(0.45 * out, -0.8, -0.35))))
+                * tuning.elbowDefaultBend
             if let forearm = hand.forearm, simd_distance(forearm, hand.wrist) > 0.02 {
                 let elbow = hand.wrist + simd_normalize(forearm - hand.wrist) * 0.146 * calibration.height
-                pole = toModel(elbow - performerShoulder)
-            } else {
-                let out: Float = side == .left ? 1 : -1
-                pole = avatarFrame.act(simd_normalize(SIMD3<Float>(0.45 * out, -0.8, -0.35)))
+                bend += offLine(toModel(elbow - performerShoulder) * scale)
             }
-            let reached = solver.solveLeg(chain: chain, target: target, pole: pole, weight: weight,
+            let previous = side == .left ? elbowBends.left : elbowBends.right
+            if let previous, tuning.elbowSmoothing > 0 {
+                bend = previous + (bend - previous) * min(1, deltaTime / tuning.elbowSmoothing)
+            }
+            if side == .left { elbowBends.left = bend } else { elbowBends.right = bend }
+            let reached = solver.solveLeg(chain: chain, target: target, pole: bend, weight: weight,
                                           pose: &pose, model: &model)
             if side == .left { report.leftReach = reached.error } else { report.rightReach = reached.error }
 
