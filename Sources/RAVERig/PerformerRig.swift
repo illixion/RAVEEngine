@@ -304,18 +304,14 @@ public struct PerformerRig: Sendable {
         }
         boneAxis = axes
 
-        // Which way about the avatar's lateral axis lowers the chin.
+        // Which way about the avatar's lateral axis lowers the chin. The chin
+        // is in front of the hinge on any humanoid, so that is the direction
+        // used, not the jaw's children: the Synth's first child is a tongue
+        // root behind and below the hinge, and lowering that raised the chin.
         var sign: Float = 1
-        if let jaw = skeleton.jaw, jaw < count {
-            let children = (0..<count).filter { skeleton.parents[$0] == jaw }
+        if skeleton.jaw != nil {
             let lateral = avatarFrame.act(SIMD3<Float>(1, 0, 0))
-            let chin: SIMD3<Float>
-            if let child = children.first {
-                chin = position(child) - position(jaw)
-            } else {
-                chin = forward
-            }
-            sign = simd_dot(simd_cross(lateral, chin), -up) >= 0 ? 1 : -1
+            sign = simd_dot(simd_cross(lateral, forward), -up) >= 0 ? 1 : -1
         }
         jawAxisSign = sign
     }

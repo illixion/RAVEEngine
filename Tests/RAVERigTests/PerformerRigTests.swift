@@ -76,6 +76,31 @@ struct PerformerRigTests {
                                        finger(offset: -0.01), finger(offset: -0.03)])
     }
 
+    /// The Synth's jaw has a tongue chain whose root sits behind and below
+    /// the hinge. Opening the mouth must still lower the chin, which is in
+    /// front of the hinge whatever the jaw's children are.
+    @Test func theJawOpensDownwardWhateverItsChildren() throws {
+        let base = Self.skeleton()
+        let jaw = base.rest.count, tongue = jaw + 1
+        let skeleton = PerformerRig.Skeleton(
+            parents: base.parents + [Self.head, jaw],
+            rest: base.rest + [JointPose(translation: SIMD3(0, 0.02, 0.04)),
+                               JointPose(translation: SIMD3(0, -0.03, -0.05))],
+            spine: base.spine, neck: base.neck, head: base.head, jaw: jaw,
+            leftArm: base.leftArm, rightArm: base.rightArm,
+            leftDigits: base.leftDigits, rightDigits: base.rightDigits,
+            forward: base.forward, up: base.up)
+        #expect(skeleton.parents[tongue] == jaw)
+        var rig = try #require(PerformerRig(skeleton))
+        func chin(mouthOpen: Float) -> Float {
+            let pose = rig.solve(base: skeleton.rest, frame: nil, calibration: Self.calibration,
+                                 mirrored: false, mouthOpen: mouthOpen, deltaTime: 1 / 90)
+            let m = Self.model(rig, pose)[jaw]
+            return (m * SIMD4<Float>(0, 0, 0.08, 1)).y
+        }
+        #expect(chin(mouthOpen: 1) < chin(mouthOpen: 0) - 0.01)
+    }
+
     static func model(_ rig: PerformerRig, _ pose: [JointPose]) -> [float4x4] {
         PoseSolver(parents: rig.skeleton.parents).modelMatrices(of: pose)
     }
