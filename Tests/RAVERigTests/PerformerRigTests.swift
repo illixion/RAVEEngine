@@ -319,6 +319,59 @@ struct PerformerRigTests {
         #expect(simd_distance(before, during) < 1e-3)
     }
 
+    /// Both hands held in front, the left one behind the right as the eyes
+    /// see it: the headset loses the left. It must not fade to idle, and it
+    /// moves with the right hand that hides it.
+    @Test func aHandHiddenBehindTheOtherMovesWithIt() throws {
+        var rig = try #require(PerformerRig(Self.skeleton()))
+        let head = Self.calibration.head
+        let right = Self.hand(wrist: head + SIMD3(0.05, -0.35, -0.3), along: SIMD3(0, 0, -1), palm: SIMD3(0, -1, 0),
+                              thumbSide: SIMD3(-1, 0, 0))
+        // Further along nearly the same line of sight, behind the right.
+        let left = Self.hand(wrist: head + SIMD3(0.06, -0.45, -0.4), along: SIMD3(0, 0, -1), palm: SIMD3(0, -1, 0),
+                             thumbSide: SIMD3(1, 0, 0))
+        let both = PerformerFrame(head: head, headRotation: Self.level(), left: left, right: right)
+        _ = Self.solveFully(&rig, both, mirrored: false)
+        let before = PoseSolver.translation(of: Self.model(rig, rig.solve(
+            base: rig.skeleton.rest, frame: both, calibration: Self.calibration, mirrored: false,
+            deltaTime: 1 / 90))[Self.leftHand])
+        // Three seconds hidden, while the right hand drifts 10 cm to the side.
+        var pose = rig.skeleton.rest
+        for i in 0..<270 {
+            let drift = SIMD3<Float>(0.1 * Float(i) / 270, 0, 0)
+            let frame = PerformerFrame(head: head, headRotation: Self.level(), right: right.translated(by: drift))
+            pose = rig.solve(base: rig.skeleton.rest, frame: frame, calibration: Self.calibration,
+                             mirrored: false, deltaTime: 1 / 90)
+        }
+        #expect(rig.report.leftHidden)
+        #expect(rig.report.leftWeight == 1)
+        let after = PoseSolver.translation(of: Self.model(rig, pose)[Self.leftHand])
+        // The avatar faces the performer: their +X drift is its −X.
+        #expect(after.x < before.x - 0.03)
+    }
+
+    /// A hand that comes back after a loss eases from where it was bridged
+    /// rather than jumping to where tracking now puts it.
+    @Test func aReturningHandEasesBack() throws {
+        var rig = try #require(PerformerRig(Self.skeleton()))
+        let tracked = Self.solveFully(&rig, Self.leftArmOut(), mirrored: false)
+        let held = PoseSolver.translation(of: Self.model(rig, tracked)[Self.leftHand])
+        let gone = PerformerFrame(head: Self.calibration.head, headRotation: Self.level())
+        for _ in 0..<6 {
+            _ = rig.solve(base: rig.skeleton.rest, frame: gone, calibration: Self.calibration,
+                          mirrored: false, deltaTime: 1 / 90)
+        }
+        // Back 15 cm lower.
+        var moved = Self.leftArmOut()
+        moved.left = moved.left?.translated(by: SIMD3(0, -0.15, 0))
+        let first = rig.solve(base: rig.skeleton.rest, frame: moved, calibration: Self.calibration,
+                              mirrored: false, deltaTime: 1 / 90)
+        let step = PoseSolver.translation(of: Self.model(rig, first)[Self.leftHand])
+        #expect(simd_distance(step, held) < 0.05)
+        let settled = Self.solveFully(&rig, moved, mirrored: false)
+        #expect(simd_distance(PoseSolver.translation(of: Self.model(rig, settled)[Self.leftHand]), held) > 0.1)
+    }
+
     @Test("leaning forward bends the spine forward")
     func leanForward() throws {
         var rig = try #require(PerformerRig(Self.skeleton()))

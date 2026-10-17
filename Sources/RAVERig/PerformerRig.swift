@@ -30,6 +30,24 @@ public struct PerformerHand: Sendable, Equatable {
         self.fingers = fingers
     }
 
+    /// Every point moved by `offset`.
+    func translated(by offset: SIMD3<Float>) -> PerformerHand {
+        PerformerHand(wrist: wrist + offset, forearm: forearm.map { $0 + offset },
+                      thumb: thumb.map { $0 + offset }, fingers: fingers.map { $0.map { $0 + offset } })
+    }
+
+    /// Each point moved `amount` of the way toward `other`'s. A hand shaped
+    /// differently (another joint count) is simply `other`.
+    func moved(toward other: PerformerHand, by amount: Float) -> PerformerHand {
+        guard thumb.count == other.thumb.count, fingers.count == other.fingers.count,
+              zip(fingers, other.fingers).allSatisfy({ $0.count == $1.count }) else { return other }
+        func mix(_ a: SIMD3<Float>, _ b: SIMD3<Float>) -> SIMD3<Float> { a + (b - a) * amount }
+        let arm: SIMD3<Float>? = if let forearm, let theirs = other.forearm { mix(forearm, theirs) } else { other.forearm }
+        return PerformerHand(wrist: mix(wrist, other.wrist), forearm: arm,
+                             thumb: zip(thumb, other.thumb).map(mix),
+                             fingers: zip(fingers, other.fingers).map { zip($0, $1).map(mix) })
+    }
+
     /// The knuckle (metacarpophalangeal joint) of finger `i`.
     func knuckle(_ i: Int) -> SIMD3<Float>? {
         i < fingers.count && fingers[i].count >= 2 ? fingers[i][1] : nil
@@ -206,6 +224,23 @@ public struct PerformerRig: Sendable {
         public var elbowDefaultBend: Float = 0.05
         /// How quickly the elbow's bend direction follows, seconds.
         public var elbowSmoothing: Float = 0.08
+        /// A hand lost while this close to the other one, seen from the
+        /// eyes, is taken as hidden behind it: hands held together in front
+        /// block the headset's view of one another all the time.
+        public var occlusionAngle: Float = 20 * .pi / 180
+        /// How long a hand hidden behind the other is bridged, moving with
+        /// the one in view, before it starts to fade.
+        public var occludedHold: Float = 8
+        /// A hand lost while this close to straight ahead can't have left the
+        /// view that fast, so something is in front of it.
+        public var inViewAngle: Float = 35 * .pi / 180
+        /// How long such a hand is held before it starts to fade.
+        public var inViewHold: Float = 1.5
+        /// How quickly a hand that comes back after a loss moves from where
+        /// it was bridged to where it is, seconds, and for how long after its
+        /// return that easing applies.
+        public var returnEasing: Float = 0.08
+        public var returnTime: Float = 0.3
         public init() {}
     }
 
@@ -217,6 +252,9 @@ public struct PerformerRig: Sendable {
         public var leanDegrees: Float = 0
         public var leftReach: Float = .nan
         public var rightReach: Float = .nan
+        /// Being bridged behind the other hand.
+        public var leftHidden = false
+        public var rightHidden = false
     }
 
     public let skeleton: Skeleton
@@ -241,13 +279,26 @@ public struct PerformerRig: Sendable {
     /// metacarpal — so the knuckle bend belongs to the second.
     private let metacarpals: Set<Int>
     private let jawAxisSign: Float
-    private var weights: (left: Float, right: Float) = (0, 0)
-    /// Each avatar hand's last tracked performer hand, and how long it has
-    /// been gone: what a dropout holds, and what a real loss fades from.
-    private var held: (left: PerformerHand?, right: PerformerHand?) = (nil, nil)
-    private var lost: (left: Float, right: Float) = (0, 0)
-    /// Each avatar elbow's eased bend direction, off its shoulder-to-hand line.
-    private var elbowBends: (left: SIMD3<Float>?, right: SIMD3<Float>?) = (nil, nil)
+    private var hands = (left: HandState(), right: HandState())
+
+    /// One avatar hand's tracking story.
+    private struct HandState {
+        var weight: Float = 0
+        /// The last tracked performer hand, or the estimate bridging a loss:
+        /// what a dropout holds, and what a real loss fades from.
+        var held: PerformerHand?
+        /// How long it has been gone, and how long this loss is bridged.
+        var lost: Float = 0
+        var hold: Float = 0
+        /// While hidden behind the other hand: that hand's wrist last frame,
+        /// so this one moves with it.
+        var partner: SIMD3<Float>?
+        /// What was posed last frame, which a returning hand eases from.
+        var posed: PerformerHand?
+        var sinceReturn: Float = .infinity
+        /// The elbow's eased bend direction, off its shoulder-to-hand line.
+        var bend: SIMD3<Float>?
+    }
 
     public init?(_ skeleton: Skeleton) {
         let count = skeleton.rest.count
@@ -327,10 +378,7 @@ public struct PerformerRig: Sendable {
 
     /// Clears the hand weights, so the next solve eases in from the base pose.
     public mutating func reset() {
-        weights = (0, 0)
-        held = (nil, nil)
-        lost = (0, 0)
-        elbowBends = (nil, nil)
+        hands = (HandState(), HandState())
     }
 
     // MARK: - Solving
@@ -371,26 +419,67 @@ public struct PerformerRig: Sendable {
             let step = seconds > 0 ? deltaTime / seconds : 1
             return tracked ? min(1, current + step) : max(0, current - step)
         }
-        /// The hand to pose this frame and whether it counts as tracked: the
-        /// live one, or the last one seen — held at full weight through a
-        /// short dropout, then faded from rather than dropped.
-        func resolve(_ hand: PerformerHand?, held: inout PerformerHand?, lost: inout Float,
-                     weight: inout Float) -> PerformerHand? {
-            if let hand, hand.isComplete {
-                held = hand
-                lost = 0
-                weight = ease(weight, tracked: true)
-                return hand
-            }
-            lost += deltaTime
-            weight = ease(weight, tracked: lost < tuning.handHold && held != nil)
-            if weight <= 0 { held = nil }
-            return held
+        func angle(_ a: SIMD3<Float>, _ b: SIMD3<Float>) -> Float {
+            guard simd_length(a) > 1e-5, simd_length(b) > 1e-5 else { return .pi }
+            return acos(max(-1, min(1, simd_dot(simd_normalize(a), simd_normalize(b)))))
         }
-        let hands = (left: resolve(live.left, held: &held.left, lost: &lost.left, weight: &weights.left),
-                     right: resolve(live.right, held: &held.right, lost: &lost.right, weight: &weights.right))
-        report.leftWeight = weights.left
-        report.rightWeight = weights.right
+        /// The hand to pose this frame: the live one, or one bridging its
+        /// loss. A tracking blink is held where it was; a hand hidden behind
+        /// the other moves with that one for `occludedHold`; one lost in plain
+        /// view is held a little longer; then it fades rather than drops. A
+        /// hand that comes back eases from where it was bridged.
+        func resolve(_ hand: PerformerHand?, partner: PerformerHand?, state: inout HandState) -> PerformerHand? {
+            if let hand, hand.isComplete {
+                if state.lost > 0 { state.sinceReturn = 0 }
+                state.held = hand
+                state.lost = 0
+                state.partner = nil
+                state.weight = ease(state.weight, tracked: true)
+                var out = hand
+                if state.sinceReturn < tuning.returnTime, let posed = state.posed {
+                    state.sinceReturn += deltaTime
+                    out = posed.moved(toward: hand, by: tuning.returnEasing > 0
+                                      ? min(1, deltaTime / tuning.returnEasing) : 1)
+                }
+                state.posed = out
+                return out
+            }
+            let partner = partner.flatMap { $0.isComplete ? $0 : nil }
+            if state.lost == 0, let held = state.held {
+                // Just lost: how long to bridge it depends on why it went.
+                state.hold = tuning.handHold
+                if let head = frame?.head, let partner,
+                   angle(held.wrist - head, partner.wrist - head) < tuning.occlusionAngle {
+                    state.hold = tuning.occludedHold
+                    state.partner = partner.wrist
+                } else if let frame,
+                          angle(held.wrist - frame.head, frame.headRotation.act(SIMD3<Float>(0, 0, -1)))
+                            < tuning.inViewAngle {
+                    state.hold = tuning.inViewHold
+                }
+            }
+            state.lost += deltaTime
+            if let anchor = state.partner {
+                if let partner {
+                    state.held = state.held?.translated(by: partner.wrist - anchor)
+                    state.partner = partner.wrist
+                } else {
+                    // Both gone: nothing left to ride on.
+                    state.partner = nil
+                    state.hold = min(state.hold, state.lost + tuning.handHold)
+                }
+            }
+            state.weight = ease(state.weight, tracked: state.lost < state.hold && state.held != nil)
+            if state.weight <= 0 { state.held = nil }
+            state.posed = state.held
+            return state.held
+        }
+        let posedHands = (left: resolve(live.left, partner: live.right, state: &hands.left),
+                          right: resolve(live.right, partner: live.left, state: &hands.right))
+        report.leftWeight = hands.left.weight
+        report.rightWeight = hands.right.weight
+        report.leftHidden = hands.left.partner != nil
+        report.rightHidden = hands.right.partner != nil
 
         var model = solver.modelMatrices(of: pose)
         var bodyTurn = simd_quatf(angle: 0, axis: SIMD3<Float>(0, 1, 0))
@@ -464,10 +553,10 @@ public struct PerformerRig: Sendable {
         model = solver.modelMatrices(of: pose)
         let scale = armLength / (0.332 * calibration.height)
         for side in [Side.left, .right] {
-            let weight = side == .left ? weights.left : weights.right
-            guard weight > 0.001, let hand = side == .left ? hands.left : hands.right,
+            let weight = side == .left ? hands.left.weight : hands.right.weight
+            guard weight > 0.001, let hand = side == .left ? posedHands.left : posedHands.right,
                   let shoulders else {
-                if side == .left { elbowBends.left = nil } else { elbowBends.right = nil }
+                if side == .left { hands.left.bend = nil } else { hands.right.bend = nil }
                 continue
             }
             // Mirrored, the avatar's left hand is the performer's right, so it
@@ -496,11 +585,11 @@ public struct PerformerRig: Sendable {
                 let elbow = hand.wrist + simd_normalize(forearm - hand.wrist) * 0.146 * calibration.height
                 bend += offLine(toModel(elbow - performerShoulder) * scale)
             }
-            let previous = side == .left ? elbowBends.left : elbowBends.right
+            let previous = side == .left ? hands.left.bend : hands.right.bend
             if let previous, tuning.elbowSmoothing > 0 {
                 bend = previous + (bend - previous) * min(1, deltaTime / tuning.elbowSmoothing)
             }
-            if side == .left { elbowBends.left = bend } else { elbowBends.right = bend }
+            if side == .left { hands.left.bend = bend } else { hands.right.bend = bend }
             let reached = solver.solveLeg(chain: chain, target: target, pole: bend, weight: weight,
                                           pose: &pose, model: &model)
             if side == .left { report.leftReach = reached.error } else { report.rightReach = reached.error }
