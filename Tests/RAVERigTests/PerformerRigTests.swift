@@ -350,6 +350,44 @@ struct PerformerRigTests {
         #expect(after.x < before.x - 0.03)
     }
 
+    /// Hands waved past each other in front: the left goes behind the right
+    /// while they move opposite ways. The hidden one keeps going the way it
+    /// was, slowing, rather than riding the right hand back or stopping dead.
+    @Test func aHandWavedPastTheOtherCoastsOnItsOwn() throws {
+        var rig = try #require(PerformerRig(Self.skeleton()))
+        let head = Self.calibration.head
+        func hand(_ wrist: SIMD3<Float>, _ thumb: SIMD3<Float>) -> PerformerHand {
+            Self.hand(wrist: wrist, along: SIMD3(0, 0, -1), palm: SIMD3(0, -1, 0), thumbSide: thumb)
+        }
+        // Half a second of the left moving right at 0.6 m/s and the right
+        // moving left at the same speed, a hand's width apart in depth, so they
+        // line up as the left disappears.
+        var left = head + SIMD3<Float>(-0.25, -0.4, -0.45), right = head + SIMD3<Float>(0.35, -0.35, -0.3)
+        let step: Float = 1 / 90, speed: Float = 0.6
+        var pose = rig.skeleton.rest
+        for _ in 0..<45 {
+            left.x += speed * step
+            right.x -= speed * step
+            let frame = PerformerFrame(head: head, headRotation: Self.level(),
+                                       left: hand(left, SIMD3(1, 0, 0)), right: hand(right, SIMD3(-1, 0, 0)))
+            pose = rig.solve(base: rig.skeleton.rest, frame: frame, calibration: Self.calibration,
+                             mirrored: false, deltaTime: step)
+        }
+        let before = PoseSolver.translation(of: Self.model(rig, pose)[Self.leftHand])
+        // Now the left is hidden for a third of a second; the right keeps going.
+        for _ in 0..<30 {
+            right.x -= speed * step
+            let frame = PerformerFrame(head: head, headRotation: Self.level(), right: hand(right, SIMD3(-1, 0, 0)))
+            pose = rig.solve(base: rig.skeleton.rest, frame: frame, calibration: Self.calibration,
+                             mirrored: false, deltaTime: step)
+        }
+        #expect(rig.report.leftBridge.contains("coasting"))
+        #expect(rig.report.leftWeight == 1)
+        let after = PoseSolver.translation(of: Self.model(rig, pose)[Self.leftHand])
+        // The performer's +X is the avatar's −X: the hand kept going that way.
+        #expect(after.x < before.x - 0.02)
+    }
+
     /// A hand that comes back after a loss eases from where it was bridged
     /// rather than jumping to where tracking now puts it.
     @Test func aReturningHandEasesBack() throws {
