@@ -106,6 +106,34 @@ public struct PerformerCalibration: Sendable, Equatable {
         self.init(head: SIMD3<Float>(c.3.x, c.3.y, c.3.z),
                   forward: -SIMD3<Float>(c.2.x, c.2.y, c.2.z), height: height)
     }
+
+    // The body the rig fits under a tracked head, scaled from a 1.70 m
+    // performer: the top of the neck (behind and below the eyes), the neck's
+    // base, and the shoulders either side of it.
+    static let atlasOffset = SIMD3<Float>(0, -0.07, 0.08)
+    static let neckDrop: Float = 0.11
+    static let shoulderHalfWidth: Float = 0.17
+    static let shoulderDrop: Float = 0.03
+
+    var proportion: Float { height / 1.70 }
+
+    /// The base of the neck when the performer stands as calibrated.
+    public var neutralNeck: SIMD3<Float> {
+        let neutral = PerformerRig.neutralHead(performer: PerformerRig.frame(up: SIMD3<Float>(0, 1, 0),
+                                                                             forward: forward))
+        return head + neutral.act(Self.atlasOffset * proportion) - SIMD3<Float>(0, Self.neckDrop * proportion, 0)
+    }
+
+    /// Where the rig puts the performer's shoulders when they stand as
+    /// calibrated: what it measures each wrist from.
+    public var neutralShoulders: (left: SIMD3<Float>, right: SIMD3<Float>) {
+        let left = simd_normalize(simd_cross(SIMD3<Float>(0, 1, 0), forward))
+        let neck = neutralNeck - SIMD3<Float>(0, Self.shoulderDrop * proportion, 0)
+        return (neck + left * Self.shoulderHalfWidth * proportion, neck - left * Self.shoulderHalfWidth * proportion)
+    }
+
+    /// Shoulder to wrist, as the rig assumes it from the height.
+    public var armLength: Float { 0.332 * height }
 }
 
 // MARK: - The rig
@@ -295,7 +323,12 @@ public struct PerformerRig: Sendable {
     private let avatarFrame: simd_quatf
     private let leftArmChain: PoseSolver.Chain
     private let rightArmChain: PoseSolver.Chain
-    private let armLength: Float
+    /// The avatar's shoulder to wrist, both arms averaged, in model units.
+    public let armLength: Float
+    /// Each leg's hip, knee and ankle, when the skeleton has two under its
+    /// hips: what `seatLegs` folds.
+    private let legs: [[Int]]
+    public var hasLegs: Bool { !legs.isEmpty }
     /// Each hand's palm frame in the hand joint's own space.
     private let leftPalm: simd_quatf?
     private let rightPalm: simd_quatf?
@@ -363,6 +396,25 @@ public struct PerformerRig: Sendable {
         }
         armLength = (reach(skeleton.leftArm) + reach(skeleton.rightArm)) / 2
 
+        // The legs hang from the hips beside the spine. Each joint's lowest
+        // child is the next one down: a twist bone or a skirt beside it
+        // hangs less far.
+        func lowestChild(of joint: Int) -> Int? {
+            skeleton.parents.indices.filter { skeleton.parents[$0] == joint }
+                .min { simd_dot(position($0), up) < simd_dot(position($1), up) }
+        }
+        var legs: [[Int]] = []
+        if let spineRoot = skeleton.spine.first, let hips = skeleton.parents[spineRoot] {
+            for thigh in skeleton.parents.indices where skeleton.parents[thigh] == hips && thigh != spineRoot {
+                guard let knee = lowestChild(of: thigh), let ankle = lowestChild(of: knee) else { continue }
+                // A leg reaches well down, further than an arm is long.
+                if simd_dot(position(hips) - position(ankle), up) > armLength * 0.8 {
+                    legs.append([thigh, knee, ankle])
+                }
+            }
+        }
+        self.legs = legs.count == 2 ? legs : []
+
         // A finger whose first joint is much nearer the wrist than its
         // second starts with a metacarpal: VRChat rigs such as the Synth carry
         // one (`Index_Base`, 5 cm from the wrist, then `Index_1` at the
@@ -413,6 +465,47 @@ public struct PerformerRig: Sendable {
         jawAxisSign = sign
     }
 
+    /// Where to put the avatar's model space in tracking space for it to be
+    /// the performer's own body, seen from inside: facing their forward,
+    /// sized so its arms are as long as the rig takes theirs to be, and its
+    /// shoulders centred on theirs. Solved with this as `placement`, its
+    /// hands reach the tracked wrists.
+    ///
+    /// - Parameter pose: the pose whose shoulders to centre, the base the
+    ///   solve will start from (an idle clip sways them); the rest pose when
+    ///   nil.
+    public func ownBodyPlacement(calibration: PerformerCalibration, pose: [JointPose]? = nil) -> simd_float4x4 {
+        let performer = Self.frame(up: SIMD3<Float>(0, 1, 0), forward: calibration.forward)
+        // Model → body coordinates → tracking: the inverse of the solve's
+        // unmirrored `toModel`.
+        let rotation = simd_normalize(performer * avatarFrame.inverse)
+        let scale = calibration.armLength / max(armLength, 1e-4)
+        let shoulders = calibration.neutralShoulders
+        let model = pose.flatMap { $0.count == skeleton.rest.count ? solver.modelMatrices(of: $0) : nil } ?? restModel
+        let own = (PoseSolver.translation(of: model[leftArmChain.joints[0]])
+                   + PoseSolver.translation(of: model[rightArmChain.joints[0]])) / 2
+        let translation = (shoulders.left + shoulders.right) / 2 - rotation.act(own * scale)
+        var matrix = simd_float4x4(rotation) * simd_float4x4(diagonal: SIMD4<Float>(scale, scale, scale, 1))
+        matrix.columns.3 = SIMD4<Float>(translation, 1)
+        return matrix
+    }
+
+    /// The legs folded as if on a chair, thighs forward and shins down, by
+    /// `weight` (0 leaves them, 1 is seated): for a performer sitting down,
+    /// whose own body would otherwise stand through the floor under them.
+    public func seatLegs(_ pose: [JointPose], weight: Float) -> [JointPose] {
+        guard weight > 0.001, !legs.isEmpty, pose.count == skeleton.rest.count else { return pose }
+        var pose = pose
+        var model = solver.modelMatrices(of: pose)
+        let forward = avatarFrame.act(SIMD3<Float>(0, 0, 1)), up = avatarFrame.act(SIMD3<Float>(0, 1, 0))
+        // A seat slopes back a little.
+        let thigh = simd_normalize(forward - up * 0.15)
+        for leg in legs {
+            point(leg, along: [thigh, -up], weight: min(weight, 1), pose: &pose, model: &model)
+        }
+        return pose
+    }
+
     /// Clears the hand weights, so the next solve eases in from the base pose.
     public mutating func reset() {
         hands = (HandState(), HandState())
@@ -429,9 +522,20 @@ public struct PerformerRig: Sendable {
     ///     and the head and spine keep the base pose.
     ///   - mirrored: solve the performer's reflection (an avatar facing them).
     ///   - mouthOpen: 0 closed to 1 wide.
+    ///   - placement: where the avatar's model space sits in tracking space,
+    ///     when the avatar is the performer's own body (`ownBodyPlacement`,
+    ///     never mirrored). Its hands then reach the tracked wrists
+    ///     themselves, not an offset from the estimated shoulders scaled to
+    ///     its arms, so they land on the performer's.
     public mutating func solve(base: [JointPose], frame: PerformerFrame?, calibration: PerformerCalibration,
-                               mirrored: Bool, mouthOpen: Float = 0, deltaTime: Float) -> [JointPose] {
+                               mirrored: Bool, mouthOpen: Float = 0, deltaTime: Float,
+                               placement: simd_float4x4? = nil) -> [JointPose] {
         guard base.count == skeleton.rest.count else { return base }
+        let fromTracking = placement.map { $0.inverse }
+        func inModel(_ point: SIMD3<Float>, _ m: simd_float4x4) -> SIMD3<Float> {
+            let p = m * SIMD4<Float>(point, 1)
+            return SIMD3<Float>(p.x, p.y, p.z)
+        }
         var pose = base
         var report = Report()
 
@@ -582,10 +686,10 @@ public struct PerformerRig: Sendable {
             // The torso, as a segment pivoting at hips the headset can't see:
             // the top of the neck (behind and below the eyes) moved off where
             // it sits when neutral is the lean.
-            let atlasOffset = SIMD3<Float>(0, -0.07, 0.08) * k
+            let atlasOffset = PerformerCalibration.atlasOffset * k
             let atlas = frame.head + frame.headRotation.act(atlasOffset)
             let neutralAtlas = calibration.head + neutral.act(atlasOffset)
-            let neckBase = neutralAtlas - SIMD3<Float>(0, 0.11 * k, 0)
+            let neckBase = calibration.neutralNeck
             let hips = neckBase - SIMD3<Float>(0, 0.29 * calibration.height, 0)
             var lean = PoseSolver.rotation(from: simd_normalize(neutralAtlas - hips),
                                            to: simd_normalize(atlas - hips))
@@ -605,7 +709,8 @@ public struct PerformerRig: Sendable {
             let lateral = performer.act(SIMD3<Float>(1, 0, 0))
             let currentNeck = hips + torsoTracking.act(neckBase - hips)
             func shoulder(_ side: Float) -> SIMD3<Float> {
-                currentNeck + torsoTracking.act(lateral * (0.17 * k * side) - SIMD3<Float>(0, 0.03 * k, 0))
+                currentNeck + torsoTracking.act(lateral * (PerformerCalibration.shoulderHalfWidth * k * side)
+                                                - SIMD3<Float>(0, PerformerCalibration.shoulderDrop * k, 0))
             }
             // Body x is the performer's left.
             shoulders = (shoulder(1), shoulder(-1))
@@ -638,7 +743,7 @@ public struct PerformerRig: Sendable {
 
         // Arms and hands, each side on its own weight.
         model = solver.modelMatrices(of: pose)
-        let scale = armLength / (0.332 * calibration.height)
+        let scale = armLength / calibration.armLength
         for side in [Side.left, .right] {
             let weight = side == .left ? hands.left.weight : hands.right.weight
             guard weight > 0.001, let hand = side == .left ? posedHands.left : posedHands.right,
@@ -652,7 +757,8 @@ public struct PerformerRig: Sendable {
             let chain = side == .left ? leftArmChain : rightArmChain
             let upper = chain.joints[0], hand_ = chain.joints[2]
             let shoulderModel = PoseSolver.translation(of: model[upper])
-            let target = shoulderModel + toModel(hand.wrist - performerShoulder) * scale
+            let target = fromTracking.map { inModel(hand.wrist, $0) }
+                ?? shoulderModel + toModel(hand.wrist - performerShoulder) * scale
 
             // The elbow bends toward where the performer's is: the forearm
             // points back to it. Only the part of that off the shoulder-to-
@@ -670,7 +776,8 @@ public struct PerformerRig: Sendable {
                 * tuning.elbowDefaultBend
             if let forearm = hand.forearm, simd_distance(forearm, hand.wrist) > 0.02 {
                 let elbow = hand.wrist + simd_normalize(forearm - hand.wrist) * 0.146 * calibration.height
-                bend += offLine(toModel(elbow - performerShoulder) * scale)
+                bend += offLine(fromTracking.map { inModel(elbow, $0) - shoulderModel }
+                                ?? toModel(elbow - performerShoulder) * scale)
             }
             let previous = side == .left ? hands.left.bend : hands.right.bend
             if let previous, tuning.elbowSmoothing > 0 {

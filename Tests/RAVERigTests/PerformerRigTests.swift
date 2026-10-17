@@ -20,7 +20,7 @@ struct PerformerRigTests {
 
     /// `metacarpals` starts each finger inside the palm, the way the Synth's
     /// do, with the knuckle at its second joint.
-    static func skeleton(metacarpals: Bool = false) -> PerformerRig.Skeleton {
+    static func skeleton(metacarpals: Bool = false, legs: Bool = false) -> PerformerRig.Skeleton {
         func j(_ x: Float, _ y: Float, _ z: Float) -> JointPose { JointPose(translation: SIMD3(x, y, z)) }
         // The avatar faces +Z, so its left is +X.
         func arm(_ side: Float) -> [JointPose] {
@@ -30,11 +30,21 @@ struct PerformerRigTests {
                     j(root * side, 0, -0.02), j(next * side, 0, 0),
                     j(0.02 * side, 0, 0.04), j(0.03 * side, 0, 0.01)]
         }
-        let rest = [j(0, 1, 0), j(0, 0.15, 0), j(0, 0.15, 0), j(0, 0.15, 0), j(0, 0.1, 0)] + arm(1) + arm(-1)
+        var rest = [j(0, 1, 0), j(0, 0.15, 0), j(0, 0.15, 0), j(0, 0.15, 0), j(0, 0.1, 0)] + arm(1) + arm(-1)
         func armParents(_ base: Int) -> [Int?] {
             [chest, base, base + 1, base + 2, base + 3, base + 2, base + 5, base + 2, base + 7]
         }
-        let parents: [Int?] = [nil, 0, 1, 2, 3] + armParents(5) + armParents(14)
+        var parents: [Int?] = [nil, 0, 1, 2, 3] + armParents(5) + armParents(14)
+        if legs {
+            // Hips, then a thigh twist bone beside each knee, as VRChat rigs
+            // carry; the toe after the ankle.
+            for side: Float in [1, -1] {
+                let thigh = rest.count
+                rest += [j(0.1 * side, -0.05, 0), j(0, -0.45, 0), j(0, -0.42, 0), j(0, -0.08, 0.1),
+                         j(0, -0.1, 0)]
+                parents += [hips, thigh, thigh + 1, thigh + 2, thigh]
+            }
+        }
         return PerformerRig.Skeleton(
             parents: parents, rest: rest, spine: [spine, chest], neck: neck, head: head, jaw: nil,
             leftArm: [leftUpper, leftFore, leftHand], rightArm: [rightUpper, rightFore, rightHand],
@@ -207,6 +217,50 @@ struct PerformerRigTests {
         let restModel = Self.model(rig, rig.skeleton.rest)
         #expect(simd_distance(PoseSolver.translation(of: model[Self.rightHand]),
                               PoseSolver.translation(of: restModel[Self.rightHand])) < 1e-4)
+    }
+
+    @Test("placed as the performer's own body, the avatar's hand lands on the tracked wrist")
+    func ownBodyReachesTheWrist() throws {
+        var rig = try #require(PerformerRig(Self.skeleton()))
+        let placement = rig.ownBodyPlacement(calibration: Self.calibration)
+        let frame = Self.leftArmOut()
+        var pose = rig.skeleton.rest
+        for _ in 0..<30 {
+            pose = rig.solve(base: rig.skeleton.rest, frame: frame, calibration: Self.calibration,
+                             mirrored: false, deltaTime: 1 / 90, placement: placement)
+        }
+        func world(_ joint: Int, _ pose: [JointPose]) -> SIMD3<Float> {
+            let p = placement * SIMD4<Float>(PoseSolver.translation(of: Self.model(rig, pose)[joint]), 1)
+            return SIMD3(p.x, p.y, p.z)
+        }
+        let wrist = try #require(frame.left?.wrist)
+        #expect(simd_distance(world(Self.leftHand, pose), wrist) < 0.01)
+        // At rest its shoulders straddle the performer's, facing their way.
+        let shoulders = Self.calibration.neutralShoulders
+        let left = world(Self.leftUpper, rig.skeleton.rest), right = world(Self.rightUpper, rig.skeleton.rest)
+        #expect(simd_distance((left + right) / 2, (shoulders.left + shoulders.right) / 2) < 1e-4)
+        #expect(simd_dot(left - right, shoulders.left - shoulders.right) > 0)
+        // Its arm is as long as the rig takes the performer's to be.
+        let scale = simd_length(SIMD3(placement.columns.0.x, placement.columns.0.y, placement.columns.0.z))
+        #expect(abs(rig.armLength * scale - Self.calibration.armLength) < 1e-4)
+    }
+
+    @Test("seated, the legs fold at hip and knee, thighs forward and shins down")
+    func seatedLegsFold() throws {
+        let rig = try #require(PerformerRig(Self.skeleton(legs: true)))
+        #expect(rig.hasLegs)
+        let rest = rig.skeleton.rest
+        let seated = Self.model(rig, rig.seatLegs(rest, weight: 1))
+        // Left leg: thigh 23, knee 24, ankle 25.
+        let hip = PoseSolver.translation(of: seated[23]), knee = PoseSolver.translation(of: seated[24])
+        let ankle = PoseSolver.translation(of: seated[25])
+        let thigh = simd_normalize(knee - hip), shin = simd_normalize(ankle - knee)
+        #expect(thigh.z > 0.95)
+        #expect(shin.y < -0.99)
+        // No weight leaves them be, and a skeleton without legs has none.
+        #expect(rig.seatLegs(rest, weight: 0) == rest)
+        let legless = try #require(PerformerRig(Self.skeleton()))
+        #expect(!legless.hasLegs)
     }
 
     @Test("mirrored, the performer's left hand drives the avatar's right")
