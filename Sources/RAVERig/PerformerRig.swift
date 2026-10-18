@@ -134,6 +134,18 @@ public struct PerformerCalibration: Sendable, Equatable {
 
     /// Shoulder to wrist, as the rig assumes it from the height.
     public var armLength: Float { 0.332 * height }
+
+    /// The base of the neck to the hip joints, of the height.
+    static let hipsDrop: Float = 0.29
+    /// The eyes' height over the floor standing, of the height.
+    static let eyeHeight: Float = 0.936
+
+    /// Between the hip joints when the performer stands as calibrated: what
+    /// a lean pivots about, and where a pelvis is measured from.
+    public var neutralHips: SIMD3<Float> { neutralNeck - SIMD3<Float>(0, Self.hipsDrop * height, 0) }
+
+    /// Hip joint to the floor, standing, as the rig assumes it from the height.
+    public var legLength: Float { 0.53 * height }
 }
 
 // MARK: - The rig
@@ -202,12 +214,18 @@ public struct PerformerRig: Sendable {
         public var rightArm: [Int]
         public var leftDigits: Digits?
         public var rightDigits: Digits?
+        /// Thigh, knee, ankle, then the ball of the foot if there is one: a
+        /// digitigrade leg's raised hock is its ankle. Nil finds them: the
+        /// two limbs hanging off the hips, each joint's lowest child the next.
+        public var leftLeg: [Int]?
+        public var rightLeg: [Int]?
         /// Which way the avatar faces, and up, in model space.
         public var forward: SIMD3<Float>
         public var up: SIMD3<Float>
 
         public init(parents: [Int?], rest: [JointPose], spine: [Int], neck: Int?, head: Int, jaw: Int?,
                     leftArm: [Int], rightArm: [Int], leftDigits: Digits?, rightDigits: Digits?,
+                    leftLeg: [Int]? = nil, rightLeg: [Int]? = nil,
                     forward: SIMD3<Float>, up: SIMD3<Float>) {
             self.parents = parents
             self.rest = rest
@@ -219,6 +237,8 @@ public struct PerformerRig: Sendable {
             self.rightArm = rightArm
             self.leftDigits = leftDigits
             self.rightDigits = rightDigits
+            self.leftLeg = leftLeg
+            self.rightLeg = rightLeg
             self.forward = forward
             self.up = up
         }
@@ -235,6 +255,8 @@ public struct PerformerRig: Sendable {
         public var leanLimit: Float = 35 * .pi / 180
         /// How wide the jaw opens at `mouthOpen` 1.
         public var jawOpen: Float = 16 * .pi / 180
+        /// How far an untracked arm swings forward and back at a full stride.
+        public var armSwing: Float = 18 * .pi / 180
         /// Seconds to ease a hand in when it appears, and out when it goes.
         public var handFadeIn: Float = 0.15
         public var handFadeOut: Float = 0.5
@@ -310,6 +332,11 @@ public struct PerformerRig: Sendable {
         /// (`blink`, `hidden`, `inView`) with what decided it, or `none`.
         public var leftBridge = "none"
         public var rightBridge = "none"
+        /// How far each ankle ended from where the lower body put it, model
+        /// units, and how far the pelvis had to drop for the legs to reach.
+        public var leftFootError: Float = .nan
+        public var rightFootError: Float = .nan
+        public var pelvisDrop: Float = 0
     }
 
     public let skeleton: Skeleton
@@ -325,10 +352,45 @@ public struct PerformerRig: Sendable {
     private let rightArmChain: PoseSolver.Chain
     /// The avatar's shoulder to wrist, both arms averaged, in model units.
     public let armLength: Float
-    /// Each leg's hip, knee and ankle, when the skeleton has two under its
-    /// hips: what `seatLegs` folds.
-    private let legs: [[Int]]
+    /// Both legs, left first, when the skeleton has two under its hips: what
+    /// `seatLegs` folds and a lower body poses.
+    private let legs: [Leg]
     public var hasLegs: Bool { !legs.isEmpty }
+    /// The joint the legs and the spine hang from.
+    private let hips: Int?
+    /// The feet as the bind pose has them, model units: what `footShape` and
+    /// `stanceWidth` scale.
+    private let feet: Feet?
+    /// How far the skin reaches below the lowest joint of a foot, model
+    /// units: the sole under the joints. Skeletons don't say; the host can
+    /// measure it from the mesh, and the feet then stand on the floor rather
+    /// than in it.
+    public var soleDepth: Float = 0
+
+    /// One leg as the rig poses it.
+    private struct Leg: Sendable {
+        var thigh: Int
+        var knee: Int
+        /// A digitigrade leg's raised hock.
+        var ankle: Int
+        /// The first joint of each toe pointing forward, where it bends up
+        /// off the ball of the foot.
+        var toes: [Int]
+        var chain: PoseSolver.Chain
+        /// Thigh and shin, as built.
+        var length: Float
+    }
+
+    private struct Feet: Sendable {
+        var ankleHeight: Float
+        var heel: Float
+        var ball: Float
+        /// Ankle to ankle across the body.
+        var width: Float
+        /// The height (along up) of the lowest foot joint, and of the hips.
+        var sole: Float
+        var hips: Float
+    }
     /// Each hand's palm frame in the hand joint's own space.
     private let leftPalm: simd_quatf?
     private let rightPalm: simd_quatf?
@@ -403,17 +465,83 @@ public struct PerformerRig: Sendable {
             skeleton.parents.indices.filter { skeleton.parents[$0] == joint }
                 .min { simd_dot(position($0), up) < simd_dot(position($1), up) }
         }
-        var legs: [[Int]] = []
-        if let spineRoot = skeleton.spine.first, let hips = skeleton.parents[spineRoot] {
+        let hips = skeleton.spine.first.flatMap { skeleton.parents[$0] }
+        var below: [[Int]] = Array(repeating: [], count: count)
+        for (joint, parent) in skeleton.parents.enumerated() {
+            if let parent, parent >= 0, parent < count { below[parent].append(joint) }
+        }
+        func subtree(_ joint: Int) -> [Int] { [joint] + below[joint].flatMap(subtree) }
+        // How far forward of the ankle each joint of the foot sits.
+        func ahead(_ joint: Int, of ankle: Int) -> Float { simd_dot(position(joint) - position(ankle), forward) }
+        func legs(_ chains: [[Int]]) -> [Leg] {
+            let found: [Leg] = chains.compactMap { chain in
+                guard chain.count >= 3, chain.allSatisfy({ $0 < count }),
+                      let solved = solver.chain(Array(chain.prefix(3))) else { return nil }
+                // The toes bend where each forward one starts: its first joint
+                // a fair way toward the tips. Not simply the next joint down,
+                // which on some rigs (the Synth's `Digi_Toes`) sits on the
+                // ankle with every toe hanging off it, a rear claw included.
+                let ankle = chain[2]
+                let foot = subtree(ankle).dropFirst()
+                let tip = foot.map { ahead($0, of: ankle) }.max() ?? 0
+                let toes = tip > 1e-4 ? foot.filter { joint in
+                    ahead(joint, of: ankle) > 0.25 * tip
+                        && skeleton.parents[joint].map { $0 == ankle || ahead($0, of: ankle) <= 0.25 * tip } ?? false
+                } : []
+                return Leg(thigh: chain[0], knee: chain[1], ankle: ankle, toes: toes, chain: solved,
+                           length: simd_distance(position(chain[0]), position(chain[1]))
+                               + simd_distance(position(chain[1]), position(chain[2])))
+            }
+            return found.count == 2 ? found : []
+        }
+        var found: [Leg] = []
+        if let left = skeleton.leftLeg, let right = skeleton.rightLeg { found = legs([left, right]) }
+        if found.isEmpty, let spineRoot = skeleton.spine.first, let hips {
+            var chains: [[Int]] = []
             for thigh in skeleton.parents.indices where skeleton.parents[thigh] == hips && thigh != spineRoot {
                 guard let knee = lowestChild(of: thigh), let ankle = lowestChild(of: knee) else { continue }
                 // A leg reaches well down, further than an arm is long.
                 if simd_dot(position(hips) - position(ankle), up) > armLength * 0.8 {
-                    legs.append([thigh, knee, ankle])
+                    chains.append([thigh, knee, ankle])
                 }
             }
+            // Left first: the one on the avatar's left.
+            let lateral = avatarFrame.act(SIMD3<Float>(1, 0, 0))
+            chains.sort { simd_dot(position($0[0]), lateral) > simd_dot(position($1[0]), lateral) }
+            found = legs(chains)
         }
-        self.legs = legs.count == 2 ? legs : []
+        self.legs = found
+        self.hips = found.isEmpty ? nil : hips
+        // The feet: the ankle's height over the lowest joint of the foot, how
+        // far forward the ball is, and how far apart the two stand. A foot
+        // carried this high off the floor is a digitigrade one, standing on
+        // its toes with no heel to strike with.
+        if found.count == 2, let hips {
+            // The heel is whatever of the foot reaches back from the ankle
+            // (the Synth's rear claw), or a third of the way to the ball when
+            // nothing does.
+            var ankleHeight: Float = 0, ball: Float = 0, heel: Float = 0, sole: Float = 0
+            for leg in found {
+                let foot = subtree(leg.ankle)
+                let lowest = foot.map { simd_dot(position($0), up) }.min()!
+                let height = simd_dot(position(leg.ankle), up) - lowest
+                let toes = leg.toes.map { ahead($0, of: leg.ankle) }
+                let forwardBall = toes.isEmpty ? 1.6 * height : toes.reduce(0, +) / Float(toes.count)
+                let back = -(foot.map { ahead($0, of: leg.ankle) }.min() ?? 0)
+                ankleHeight += height / 2
+                sole += lowest / 2
+                ball += forwardBall / 2
+                heel += (back > 0.1 * forwardBall ? back : 0.35 * forwardBall) / 2
+            }
+            let digitigrade = ankleHeight / max(found[0].length, 1e-4) > LegArchitecture.digitigradeThreshold
+            let lateral = avatarFrame.act(SIMD3<Float>(1, 0, 0))
+            feet = Feet(ankleHeight: ankleHeight, heel: digitigrade ? 0 : max(heel, 0),
+                        ball: max(ball, 0.2 * ankleHeight),
+                        width: abs(simd_dot(position(found[0].ankle) - position(found[1].ankle), lateral)),
+                        sole: sole, hips: simd_dot(position(hips), up))
+        } else {
+            feet = nil
+        }
 
         // A finger whose first joint is much nearer the wrist than its
         // second starts with a metacarpal: VRChat rigs such as the Synth carry
@@ -490,6 +618,30 @@ public struct PerformerRig: Sendable {
         return matrix
     }
 
+    /// Tracking metres per model unit in `ownBodyPlacement`: the avatar's arm
+    /// length against the performer's.
+    public func ownBodyScale(calibration: PerformerCalibration) -> Float {
+        calibration.armLength / max(armLength, 1e-4)
+    }
+
+    /// The avatar's feet as `PerformerGait` models a foot, at `scale`
+    /// (`ownBodyScale`): handed to the gait, it lands this avatar's feet
+    /// exactly, heel and ball where its own are. Nil without legs.
+    public func footShape(scale: Float) -> PerformerGait.FootShape? {
+        guard let feet else { return nil }
+        return PerformerGait.FootShape(ankleHeight: (feet.ankleHeight + soleDepth) * scale,
+                                       heel: feet.heel * scale, ball: feet.ball * scale)
+    }
+
+    /// The lowest foot joint's height along `skeleton.up` as built, model
+    /// units: what the skin under the feet is measured from for `soleDepth`.
+    public var lowestFootJoint: Float? { feet?.sole }
+
+    /// Ankle to ankle across the avatar's body as built, at `scale`.
+    public func stanceWidth(scale: Float) -> Float? {
+        feet.map { $0.width * scale }
+    }
+
     /// The legs folded as if on a chair, thighs forward and shins down, by
     /// `weight` (0 leaves them, 1 is seated): for a performer sitting down,
     /// whose own body would otherwise stand through the floor under them.
@@ -501,7 +653,8 @@ public struct PerformerRig: Sendable {
         // A seat slopes back a little.
         let thigh = simd_normalize(forward - up * 0.15)
         for leg in legs {
-            point(leg, along: [thigh, -up], weight: min(weight, 1), pose: &pose, model: &model)
+            point([leg.thigh, leg.knee, leg.ankle], along: [thigh, -up], weight: min(weight, 1),
+                  pose: &pose, model: &model)
         }
         return pose
     }
@@ -527,9 +680,15 @@ public struct PerformerRig: Sendable {
     ///     never mirrored). Its hands then reach the tracked wrists
     ///     themselves, not an offset from the estimated shoulders scaled to
     ///     its arms, so they land on the performer's.
+    ///   - lowerBody: the pelvis and feet, made up (`PerformerGait`) or
+    ///     tracked, for an unmirrored solve. The legs reach the feet, measured
+    ///     through `placement` (or the own-body placement when there is none:
+    ///     the pose is the same either way), and arms nothing tracks swing
+    ///     with the walk. Nil keeps the base pose's legs.
     public mutating func solve(base: [JointPose], frame: PerformerFrame?, calibration: PerformerCalibration,
                                mirrored: Bool, mouthOpen: Float = 0, deltaTime: Float,
-                               placement: simd_float4x4? = nil) -> [JointPose] {
+                               placement: simd_float4x4? = nil,
+                               lowerBody: PerformerLowerBody? = nil) -> [JointPose] {
         guard base.count == skeleton.rest.count else { return base }
         let fromTracking = placement.map { $0.inverse }
         func inModel(_ point: SIMD3<Float>, _ m: simd_float4x4) -> SIMD3<Float> {
@@ -676,6 +835,15 @@ public struct PerformerRig: Sendable {
         var bodyTurn = simd_quatf(angle: 0, axis: SIMD3<Float>(0, 1, 0))
         var shoulders: (left: SIMD3<Float>, right: SIMD3<Float>)?
 
+        // The pelvis and the legs, when something says where they are: before
+        // the spine, whose lean is measured from wherever the pelvis went.
+        var pelvisShift = SIMD3<Float>.zero
+        if let lower = lowerBody, lower.weight > 0.001, !mirrored, hips != nil {
+            let legPlacement = placement ?? ownBodyPlacement(calibration: calibration, pose: base)
+            pelvisShift = poseLegs(lower, calibration: calibration, placement: legPlacement, performer: performer,
+                                   report: &report, pose: &pose, model: &model)
+        }
+
         if let frame {
             // The head's turn away from looking straight down `forward`.
             let neutral = Self.neutralHead(performer: performer)
@@ -690,7 +858,7 @@ public struct PerformerRig: Sendable {
             let atlas = frame.head + frame.headRotation.act(atlasOffset)
             let neutralAtlas = calibration.head + neutral.act(atlasOffset)
             let neckBase = calibration.neutralNeck
-            let hips = neckBase - SIMD3<Float>(0, 0.29 * calibration.height, 0)
+            let hips = calibration.neutralHips + pelvisShift
             var lean = PoseSolver.rotation(from: simd_normalize(neutralAtlas - hips),
                                            to: simd_normalize(atlas - hips))
             if lean.angle > tuning.leanLimit {
@@ -739,6 +907,19 @@ public struct PerformerRig: Sendable {
             let lateral = avatarFrame.act(SIMD3<Float>(1, 0, 0))
             let open = simd_quatf(angle: jawAxisSign * tuning.jawOpen * min(mouthOpen, 1), axis: lateral)
             turn(jaw, by: open, pose: &pose, model: &model)
+        }
+
+        // Arms nothing tracks swing with a walk, against the legs; a tracked
+        // hand takes its arm from there.
+        if let lower = lowerBody, !mirrored, abs(lower.armSwing) > 0.001, tuning.armSwing > 0 {
+            let lateral = avatarFrame.act(SIMD3<Float>(1, 0, 0))
+            for (chain, sign) in [(leftArmChain, Float(1)), (rightArmChain, Float(-1))] {
+                let forward = lower.armSwing * sign
+                turn(chain.joints[0], by: simd_quatf(angle: -forward * tuning.armSwing, axis: lateral),
+                     pose: &pose, model: &model)
+                let bend = (0.3 + 0.5 * max(forward, 0)) * abs(lower.armSwing) * tuning.armSwing
+                turn(chain.joints[1], by: simd_quatf(angle: -bend, axis: lateral), pose: &pose, model: &model)
+            }
         }
 
         // Arms and hands, each side on its own weight.
@@ -805,6 +986,117 @@ public struct PerformerRig: Sendable {
     }
 
     private enum Side { case left, right }
+
+    // MARK: - Legs
+
+    /// Moves the pelvis and bends the legs onto `lower`, and says how far the
+    /// pelvis moved, in tracking space: the lean is measured from there.
+    private func poseLegs(_ lower: PerformerLowerBody, calibration: PerformerCalibration, placement: simd_float4x4,
+                          performer: simd_quatf, report: inout Report,
+                          pose: inout [JointPose], model: inout [float4x4]) -> SIMD3<Float> {
+        guard let hips, let feet, legs.count == 2 else { return .zero }
+        let weight = min(lower.weight, 1)
+        let fromTracking = placement.inverse
+        func point(_ p: SIMD3<Float>) -> SIMD3<Float> {
+            let m = fromTracking * SIMD4<Float>(p, 1)
+            return SIMD3<Float>(m.x, m.y, m.z)
+        }
+        func direction(_ v: SIMD3<Float>) -> SIMD3<Float> {
+            let m = fromTracking * SIMD4<Float>(v, 0)
+            return SIMD3<Float>(m.x, m.y, m.z)
+        }
+        // A rotation in tracking space, as a change from the body's frame, in
+        // model space.
+        func change(_ q: simd_quatf) -> simd_quatf {
+            simd_normalize(avatarFrame * performer.inverse * q * avatarFrame.inverse)
+        }
+        let up = avatarFrame.act(SIMD3<Float>(0, 1, 0))
+        let lateral = avatarFrame.act(SIMD3<Float>(1, 0, 0))
+        let scale = max(simd_length(SIMD3<Float>(placement.columns.0.x, placement.columns.0.y, placement.columns.0.z)),
+                        1e-4)
+
+        func moveHips(by offset: SIMD3<Float>) {
+            let parent = parentMatrix(of: hips, model: model)
+            let at = PoseSolver.translation(of: model[hips]) + offset
+            let local = parent.inverse * SIMD4<Float>(at, 1)
+            pose[hips].translation = SIMD3<Float>(local.x, local.y, local.z)
+            model[hips] = parent * pose[hips].matrix
+            refresh(below: hips, pose: pose, model: &model)
+        }
+
+        // The pelvis: moved and turned as the lower body has it, the torso
+        // turned back so only the pelvis twists under it.
+        var shift = (lower.pelvis - calibration.neutralHips) * weight
+        moveHips(by: direction(shift))
+        let pelvisTurn = simd_slerp(Self.identity, change(lower.pelvisRotation), weight)
+        turn(hips, by: pelvisTurn, pose: &pose, model: &model)
+        if let spineRoot = skeleton.spine.first {
+            turn(spineRoot, by: pelvisTurn.inverse, pose: &pose, model: &model)
+        }
+
+        // The floor, for this avatar. Its legs at full length stand on the
+        // floor through the performer's, a little long or short for the
+        // height they were scaled to. Long, they would have to crouch to
+        // stand on the real floor, so the feet stand a little into it
+        // instead; short, the pelvis drops below for them to reach. Measured
+        // as the performer would stand at their height, not where the head
+        // is: a body carried down with the head (a squat, a recentre while
+        // stooping) bends its knees rather than sinking its feet.
+        let restSole = PoseSolver.translation(of: restModel[hips]) - up * (feet.hips - feet.sole + soleDepth)
+        let standing = lower.floor + PerformerCalibration.eyeHeight * calibration.height - calibration.head.y
+        let restSoleHeight = (placement * SIMD4<Float>(restSole, 1)).y + standing
+        let sink = min(0, restSoleHeight - lower.floor)
+        let targets = [lower.left, lower.right].map { point($0.ankle + SIMD3<Float>(0, sink, 0)) }
+
+        // Legs too short for where the feet are: the pelvis comes down until
+        // both reach.
+        var drop: Float = 0
+        for (leg, target) in zip(legs, targets) {
+            let longest = leg.length * 0.999
+            let reach = target - PoseSolver.translation(of: model[leg.thigh])
+            guard simd_length(reach) > longest else { continue }
+            let below = simd_dot(reach, up)
+            let across = simd_length_squared(reach) - below * below
+            let needed = -(max(longest * longest - across, 0)).squareRoot() - below
+            drop = max(drop, min(needed, 0.3 * leg.length))
+        }
+        if drop > 0 {
+            moveHips(by: -up * drop * weight)
+            shift.y -= drop * weight * scale
+        }
+        report.pelvisDrop = drop * weight * scale
+
+        for (index, (leg, target)) in zip(legs, targets).enumerated() {
+            let foot = index == 0 ? lower.left : lower.right
+            let footTurn = change(foot.rotation)
+            var along = footTurn.act(avatarFrame.act(SIMD3<Float>(0, 0, 1)))
+            along -= simd_dot(along, up) * up
+            along = simd_length(along) > 1e-4 ? simd_normalize(along) : avatarFrame.act(SIMD3<Float>(0, 0, 1))
+            // Knees go the way the foot points, a touch outward: the
+            // direction a leg is never asked to reach along, so the bend
+            // plane holds.
+            let side: Float = index == 0 ? 1 : -1
+            let pole = simd_normalize(along + lateral * (0.25 * side))
+            let reached = solver.solveLeg(chain: leg.chain, target: target, pole: pole, weight: weight,
+                                          reachLimit: 0.999, pose: &pose, model: &model)
+            if index == 0 { report.leftFootError = reached.error } else { report.rightFootError = reached.error }
+
+            // The foot lies as the lower body has it, against the way it
+            // lies as built (flat, facing forward); the toes bend from it.
+            let ankleNow = PoseSolver.rotation(of: currentModel(leg.ankle, pose: pose, model: model))
+            let ankleWanted = footTurn * PoseSolver.rotation(of: restModel[leg.ankle])
+            set(leg.ankle, modelRotation: simd_slerp(ankleNow, simd_normalize(ankleWanted), weight),
+                pose: &pose, model: &model)
+            let bend = simd_quatf(angle: -foot.toeBend, axis: simd_normalize(footTurn.act(lateral)))
+            for toe in leg.toes {
+                let toeNow = PoseSolver.rotation(of: currentModel(toe, pose: pose, model: model))
+                let toeWanted = bend * footTurn * PoseSolver.rotation(of: restModel[toe])
+                set(toe, modelRotation: simd_slerp(toeNow, simd_normalize(toeWanted), weight),
+                    pose: &pose, model: &model)
+            }
+        }
+        return shift
+    }
 
     // MARK: - Joint writes
 
