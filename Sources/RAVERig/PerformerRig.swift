@@ -337,6 +337,8 @@ public struct PerformerRig: Sendable {
         public var leftFootError: Float = .nan
         public var rightFootError: Float = .nan
         public var pelvisDrop: Float = 0
+        /// How far the own body stands back to keep its skin out of the eyes.
+        public var clearance: Float = 0
     }
 
     public let skeleton: Skeleton
@@ -366,6 +368,10 @@ public struct PerformerRig: Sendable {
     /// measure it from the mesh, and the feet then stand on the floor rather
     /// than in it.
     public var soleDepth: Float = 0
+    /// The torso's skin, which an own body keeps clear of the eyes, and how
+    /// far back it stands for that now (tracking metres).
+    private var clearance: EyeClearance?
+    private var clearanceStep: Float = 0
 
     /// One leg as the rig poses it.
     private struct Leg: Sendable {
@@ -662,6 +668,46 @@ public struct PerformerRig: Sendable {
     /// Clears the hand weights, so the next solve eases in from the base pose.
     public mutating func reset() {
         hands = (HandState(), HandState())
+        clearanceStep = 0
+    }
+
+    /// The skin an own body keeps out of the eyes: bind-pose points with the
+    /// joint that carries each, from the host's mesh. Only the torso's are
+    /// kept, which is everything but the limbs and the head: the arms answer
+    /// to the hands, the legs to the feet, and the neck and head an own body
+    /// hides. Chest skin can hang off joints beside the spine (the Synth's
+    /// ribs), so the torso is what is left rather than a list. `radius` is in
+    /// tracking metres.
+    public mutating func keepClear(of surface: [(joint: Int, position: SIMD3<Float>)], radius: Float = 0.1) {
+        var limbs: Set<Int> = [skeleton.neck ?? skeleton.head]
+        for arm in [skeleton.leftArm, skeleton.rightArm] { limbs.insert(arm[arm.count - 3]) }
+        for leg in legs { limbs.insert(leg.thigh) }
+        func inTorso(_ joint: Int) -> Bool {
+            var cursor: Int? = joint
+            var steps = 0
+            while let at = cursor, steps < skeleton.parents.count {
+                if limbs.contains(at) { return false }
+                cursor = skeleton.parents[at]
+                steps += 1
+            }
+            return true
+        }
+        let points = surface.compactMap { point -> EyeClearance.Point? in
+            guard point.joint >= 0, point.joint < restModel.count, inTorso(point.joint) else { return nil }
+            let local = restModel[point.joint].inverse * SIMD4<Float>(point.position, 1)
+            return EyeClearance.Point(joint: point.joint, local: SIMD3<Float>(local.x, local.y, local.z))
+        }
+        clearance = points.isEmpty ? nil : EyeClearance(points: points, radius: radius)
+        clearanceStep = 0
+    }
+
+    /// `placement` (`ownBodyPlacement`) moved back as far as the skin needs
+    /// to be out of the eyes: what to solve the own body with, and place it by.
+    public func cleared(_ placement: simd_float4x4, calibration: PerformerCalibration) -> simd_float4x4 {
+        guard clearanceStep > 0 else { return placement }
+        var moved = placement
+        moved.columns.3 -= SIMD4<Float>(calibration.forward * clearanceStep, 0)
+        return moved
     }
 
     // MARK: - Solving
@@ -980,6 +1026,21 @@ public struct PerformerRig: Sendable {
                 pointDigits(digits, along: hand, toModel: toModel, weight: weight, pose: &pose, model: &model)
             }
         }
+
+        // An own body's skin out of the eyes, for next frame's placement.
+        // The step is exact for the pose just solved, measured from where it
+        // stands now; it is taken at once and given back slowly.
+        var wanted: Float = 0
+        if let placement, let frame, let clearance, !mirrored {
+            let model = solver.modelMatrices(of: pose)
+            if let more = clearance.step(root: placement, model: model, eye: frame.head,
+                                         forward: calibration.forward) {
+                wanted = max(0, clearanceStep + more)
+            }
+        }
+        let easing: Float = wanted > clearanceStep ? 0.03 : 0.3
+        clearanceStep += (wanted - clearanceStep) * min(1, deltaTime / easing)
+        report.clearance = clearanceStep
 
         self.report = report
         return pose

@@ -554,6 +554,59 @@ struct PerformerRigLegTests {
         #expect(chest < 0.5)
     }
 
+    /// A deep collar round the base of the neck, 13 cm out, on the chest.
+    static func collar() -> [(joint: Int, position: SIMD3<Float>)] {
+        (0..<24).map { i in
+            let a = Float(i) / 24 * 2 * .pi
+            return (PerformerRigTests.chest, SIMD3<Float>(0.13 * cos(a), 1.42, 0.13 * sin(a)))
+        }
+    }
+
+    /// Runs the own body for a second with the head pitched down by
+    /// `pitch` degrees about the neck, and returns the rig and its last
+    /// placement and pose.
+    static func lookDown(_ pitch: Float) -> (rig: PerformerRig, placement: simd_float4x4, pose: [JointPose],
+                                              eye: SIMD3<Float>) {
+        var rig = Self.rig()
+        rig.keepClear(of: collar())
+        let gait = Self.standing(rig)
+        let neutral = PerformerRig.neutralHead(performer: PerformerRig.frame(up: SIMD3(0, 1, 0),
+                                                                             forward: calibration.forward))
+        let offset = PerformerCalibration.atlasOffset
+        let atlas = calibration.head + neutral.act(offset)
+        let look = simd_normalize(simd_quatf(angle: -pitch * .pi / 180, axis: SIMD3(1, 0, 0)) * neutral)
+        let eye = atlas - look.act(offset)
+        let frame = PerformerFrame(head: eye, headRotation: look)
+        let base = rig.skeleton.rest
+        var placement = matrix_identity_float4x4
+        var pose = base
+        for _ in 0..<90 {
+            placement = rig.cleared(rig.ownBodyPlacement(calibration: calibration, pose: base), calibration: calibration)
+            pose = rig.solve(base: base, frame: frame, calibration: calibration, mirrored: false, deltaTime: 1 / 90,
+                             placement: placement, lowerBody: gait.lowerBody)
+        }
+        return (rig, placement, pose, eye)
+    }
+
+    @Test func lookingDownKeepsTheCollarOutOfTheEyes() {
+        let down = Self.lookDown(60)
+        #expect(down.rig.report.clearance > 0.02, "stood back \(down.rig.report.clearance) m")
+        // Nothing of the collar within 10 cm of the eye now.
+        let model = PoseSolver(parents: down.rig.skeleton.parents).modelMatrices(of: down.pose)
+        let nearest = Self.collar().map { point -> Float in
+            let local = PoseSolver(parents: down.rig.skeleton.parents).modelMatrices(of: down.rig.skeleton.rest)[point.joint]
+                .inverse * SIMD4<Float>(point.position, 1)
+            let w = down.placement * model[point.joint] * local
+            return simd_distance(SIMD3(w.x, w.y, w.z), down.eye)
+        }.min()!
+        #expect(nearest > 0.098, "the collar came within \(nearest) m of the eye")
+        // The feet stayed where they stood.
+        #expect(down.rig.report.leftFootError < 0.005 && down.rig.report.rightFootError < 0.005)
+
+        // Looking ahead, nothing is near: the body stands where it belongs.
+        #expect(Self.lookDown(0).rig.report.clearance < 0.001)
+    }
+
     @Test func untrackedArmsSwing() {
         var rig = Self.rig()
         let gait = Self.standing(rig)
