@@ -166,6 +166,9 @@ public struct PerformerGait: Sendable {
         /// m/s sideways on top: side-steps are short and quick), and the most
         /// there are.
         public var restCadence: Float = 1.5
+        /// Steps a second once the body has stopped and the feet are still
+        /// catching up: a room's few steps end with the walker, not after.
+        public var settleCadence: Float = 2.0
         public var cadencePerSpeed: Float = 0.45
         public var cadencePerSidewaysSpeed: Float = 0.6
         public var maxCadence: Float = 2.2
@@ -194,7 +197,7 @@ public struct PerformerGait: Sendable {
         /// The head's height has to turn by this much before a trough or a
         /// crest counts, and a step's bob be at least this deep, to be heard.
         public var bobHysteresis: Float = 0.002
-        public var minimumBob: Float = 0.006
+        public var minimumBob: Float = 0.004
         /// Share of a heard step's timing error made up at once.
         public var phaseGain: Float = 0.6
 
@@ -578,7 +581,10 @@ public struct PerformerGait: Sendable {
         guard let trough = bob.feed(atlas.y, time: time, dt: dt, hysteresis: tuning.bobHysteresis,
                                     minimum: tuning.minimumBob * proportion) else { return }
         report.heardCadence = bob.period.map { 1 / $0 }
-        guard stepping, walking, let at = phaseAt(trough) else { return }
+        // Heard whenever the feet are stepping: a few steps across a room are
+        // over, as far as the body is concerned, before the last of them
+        // lands.
+        guard stepping, let at = phaseAt(trough) else { return }
 
         // Which foot: the way the neck was moving across the body, less the
         // way the body itself goes (the sway rides on the travel; measured
@@ -643,8 +649,8 @@ public struct PerformerGait: Sendable {
         let sideways = abs(simd_dot(bodyVelocity, bodyLeft))
         let modelled = min(tuning.maxCadence, tuning.restCadence
                            + (tuning.cadencePerSpeed * speed + tuning.cadencePerSidewaysSpeed * sideways) / k.squareRoot())
-        var wanted = modelled
-        if walking, let period = bob.period, time - bob.lastStep < 1.2 {
+        var wanted = walking ? modelled : max(modelled, tuning.settleCadence)
+        if let period = bob.period, time - bob.lastStep < 1.2 {
             wanted = min(max(1 / period, 1.2), 2.4)
         }
         cadence += (wanted - cadence) * min(1, dt / 0.3)
@@ -661,7 +667,7 @@ public struct PerformerGait: Sendable {
 
         if stepping {
             var advance = rate * dt
-            if walking, correction != 0 {
+            if correction != 0 {
                 // Made up gradually, and never by running the clock backward.
                 let made = min(max(correction, -0.6 * advance), advance)
                 advance += made

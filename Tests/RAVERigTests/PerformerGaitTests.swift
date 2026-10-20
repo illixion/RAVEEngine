@@ -316,6 +316,24 @@ struct PerformerGaitTests {
         #expect(simd_dot(gait.body.forward, SIMD3(0, 0, -1)) > 0.99)
     }
 
+    @Test func aFewStepsAcrossTheRoomEndWithTheWalker() {
+        // Two steps, half a metre, slow, with a shallow bob.
+        var walker = Walker()
+        walker.speed = 0.55
+        walker.cadence = 1.5
+        walker.bob = 0.003
+        walker.sway = 0.006
+        walker.walkTo = 2.2
+        var gait = PerformerGait(calibration: Self.calibration)
+        let trace = Self.run(&gait, from: 0, to: 5) { (walker.head($0), Self.looking(walker.facing)) }
+        #expect(trace.steps >= 2)
+        let last = trace.landings.last?.time ?? 0
+        #expect(last < walker.walkTo + 0.9, "the last foot landed \(last - walker.walkTo) s after the walker stopped")
+        #expect(trace.slide < 0.002)
+        let body = gait.lowerBody
+        #expect(abs(simd_dot(body.left.ankle - body.right.ankle, walker.travel)) < 0.06)
+    }
+
     @Test func aStepBackIsAStep() {
         // Back 20 cm in a second: well inside a lean forward, but people
         // don't lean back that far.
