@@ -167,7 +167,7 @@ loop. The other consumers drive the same code from `@MainActor`. So:
 - `RAVEPinchDetector`, `RAVEHandJoystick`, `RAVEArmSwinger`, `RAVEPalmGeometry`, `RAVEEdgeTracker`,
   `RAVEGestureGate`, `RAVEPalmFacingGate`, `RAVEHandOwnership`, `RAVESystemPinchGate`,
   `RAVEStickShaping`/`RAVESnapTurnDetector`, `RAVESampleSeries`, `RAVEQuestCalibration`,
-  `RAVEQuestHoldDetector`, `RAVEQuestAlignment`, `RAVEQuestBridgeProtocol` are **isolation-free value types**
+  `RAVEQuestHoldDetector`, `RAVEQuestAlignment`, `RAVEQuestBridgeProtocol`, `RAVEGamepadSnapshot` are **isolation-free value types**
 - `RAVEMetricCollector` and `RAVEQuestBridgeSource` are **lock-guarded classes**, `@unchecked
   Sendable` — an actor would make `record()` / `poll()` async and unusable from exactly the
   callers that need them most
