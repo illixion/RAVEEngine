@@ -63,7 +63,7 @@ public struct RAVEGamepadSnapshot: Sendable, Equatable {
     /// which would read as a pad held perfectly still.
     public var rotationRate: SIMD3<Float>?
     /// Total acceleration in g, gravity included (`GCMotion.acceleration`), same
-    /// axes. Nil on the same terms.
+    /// axes. Nil when the capture was not given a `GCMotion`.
     public var acceleration: SIMD3<Float>?
 
     public init(buttons: Buttons = [],
@@ -119,10 +119,12 @@ extension RAVEGamepadSnapshot {
                 let r = motion.rotationRate
                 rotationRate = SIMD3(Float(r.x), Float(r.y), Float(r.z))
             }
-            if motion.hasGravityAndUserAcceleration {
-                let a = motion.acceleration
-                acceleration = SIMD3(Float(a.x), Float(a.y), Float(a.z))
-            }
+            // Every GCMotion measures total acceleration. hasGravityAndUserAcceleration
+            // only says whether it can also split gravity out, and GCMotion.h says to
+            // read `acceleration` when it can't: DualShock, DualSense and Switch pads
+            // report false, and gating on it dropped their accelerometers.
+            let a = motion.acceleration
+            acceleration = SIMD3(Float(a.x), Float(a.y), Float(a.z))
         }
 
         self.init(buttons: buttons,
