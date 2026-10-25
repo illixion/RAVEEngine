@@ -52,9 +52,9 @@ sits behind `RAVEHandInputProvider`, which returns `RAVENoHandInput` off-visionO
 
 | Target | Purpose |
 |---|---|
-| `RAVEInput` | Hand + controller sensing, pinch/joystick/palm geometry, binding tables, tracked controllers (PSVR2 Sense; Quest Touch over the LAN via Controller Bridge), physical mouse (`RAVEMouseSource`), the mouse-catcher rule for immersive spaces (`RAVEMouseCatcherRule`) |
+| `RAVEInput` | Hand + controller sensing, pinch/joystick/palm geometry, binding tables, tracked controllers (PSVR2 Sense; Quest Touch over the LAN via Controller Bridge), physical mouse (`RAVEMouseSource`), the mouse-catcher rule for immersive spaces (`RAVEMouseCatcherRule`), a whole body from PoseHub's cameras (`RAVEBodyStreamSource`, see "Body stream") |
 | `RAVEDiagnostics` | Frame profiler, metric collector, feed gating, HUD views |
-| `RAVERig` | Skeleton geometry, humanoid inference, FABRIK, pose solving, leg stepping, a tracked performer driving a humanoid (`PerformerRig`, head + hands, mirrored or not, or placed as the performer's own body so its hands land on theirs, legs folded when they sit, legs walking from a `PerformerLowerBody`), and that lower body made up from the head (`PerformerGait`: steps in time with the head's bob; its pelvis and feet are tracker poses, meant for Longwave's PC VR too) — shipping, see README |
+| `RAVERig` | Skeleton geometry, humanoid inference, FABRIK, pose solving, leg stepping, a tracked performer driving a humanoid (`PerformerRig`, head + hands, mirrored or not, or placed as the performer's own body so its hands land on theirs, legs folded when they sit, legs walking from a `PerformerLowerBody`), and that lower body made up from the head (`PerformerGait`: steps in time with the head's bob; its pelvis and feet are tracker poses, meant for Longwave's PC VR too), and that lower body measured (`TrackedLegs`: planted feet pinned, gaps held, faded against the gait with `PerformerLowerBody.mix`) — shipping, see README |
 | `RAVEHolo` | In-world holographic UI for Metal hosts: SDF glyph atlas (CoreText, no font shipped), panel/gauge/text scene, Metal 4 renderer drawing into a pass the host owns. Shader source compiles at runtime (SwiftPM's CLI builds no `.metal`); `RAVEHOLO_SNAPSHOT=/x.png swift test --filter RAVEHolo` renders a sample panel to look at. Renderer is `@available(macOS 26)` (Metal 4) without raising the package floor. Also interactive: pinchable targets (Compositor Services tracking areas + a CPU ray hit-test), widgets/stack layout, and a palm anchor (`RAVEHoloPalmAnchor`, an alias of RAVEInput's `RAVEPalmAnchor`, shared with `RAVEPanel`) — see "RAVEHolo: interactive panels". Depends on `RAVEInput` for the anchor only. Consumers: LambdaVision (HEV HUD + developer palm debug panel), Oneiros (Metal-host wrist HUD) |
 | `RAVEPanel` | Any SwiftUI view as a panel in a RealityKit scene: chrome, the attachment hosting fix, world / palm / head-follow placing, and a visibility verdict to pause content by. Rules host-tested, entity half visionOS-only. Depends on `RAVEInput` for the palm anchor. See "About `RAVEPanel`". Consumers: spatial-ai-character, Longwave |
 | `RAVEPCVR` | Planned — see "About the planned RAVEPCVR target" below before touching this |
@@ -305,6 +305,36 @@ A persisted transform is restored **untrusted** by default (`trustRestoredCalibr
 false`): ARKit re-establishes its world origin every session, so last launch's transform is
 right only when the origin lands in the same place. Untrusted, it publishes nothing until one
 fresh pair agrees, and the watchdog discards it within a second when none does.
+
+### Body stream
+
+PoseHub (miscale's `Tools/PoseHub`, Python) watches the performer with two or more cameras and sends a
+fused metric skeleton over UDP: joints and tracker poses (head, hips, feet, knees, chest), specified in
+`Tools/PoseHub/BODY_STREAM.md`. Consumers subscribe every second and frames come back, so no device opens
+a port. Three decoders read the same bytes, each tested against the hub's fixture: the hub's own, this
+one (`RAVEBodyStreamProtocol`), and the Longwave broker's C++ (`SessionBroker/broker/body_stream.cpp`,
+VRChat OSC trackers).
+
+- **`RAVEBodyStreamSource`** (lock-guarded, isolation-free like the Quest source): finds the hub over
+  Bonjour (`_posehub._udp`) or at an address, subscribes, keeps the newest frame. It connects to the
+  addresses in the hub's TXT record in turn rather than to the service: a UDP `NWConnection` to the
+  service sat in "preparing" for good on macOS 27 although `dns-sd` resolved it, and a hub on a
+  machine with several networks advertises addresses some consumers can't reach. Apps need
+  `NSLocalNetworkUsageDescription` and `NSBonjourServices` = `_posehub._udp`.
+- **`RAVEBodyAlignment`**: the hub's space and the headset's are both gravity-aligned, so a 4-DoF fit
+  (yaw + translation, 2D Kabsch, robust passes, 60 s ageing) maps one onto the other, from pairs the
+  app gives away for free: the headset's head and wrists against the cameras'. A frame is 50–90 ms
+  old on arrival, so the source pairs it with where the headset had them *then* (its `latency` plus
+  `networkDelay`) and skips pairs from anchors moving over 1 m/s. No per-anchor offsets (unlike
+  `RAVEQuestCalibration`): a BlazePose wrist and an ARKit wrist are the same point, near enough,
+  and the head's between-the-ears-to-eyes offset is a fixed estimate (`headOffset`).
+- **`TrackedLegs`** (RAVERig) turns the hips and feet into a `PerformerLowerBody`. The app does the
+  three-line glue between the two targets, which keeps RAVERig free of RAVEInput.
+- Test against a real hub: `python -m posehub play <recording.jsonl>` there, then
+  `RAVE_BODY_HUB=127.0.0.1:7711 swift test --filter liveHub` (or `RAVE_BODY_HUB=discover`).
+
+**Unverified on device:** the alignment against a real headset, the head offset, and whether
+BlazePose still sees the face under a headset (the head pair only; wrists carry the fit).
 
 ### Mouse
 
