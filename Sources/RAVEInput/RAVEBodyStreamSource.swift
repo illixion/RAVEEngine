@@ -85,6 +85,8 @@ public final class RAVEBodyStreamSource: @unchecked Sendable {
         public var hubLatencyMs: Float = 0
         /// Seconds since the newest frame arrived.
         public var frameAge: Double?
+        public var clockUncertaintyMs: Double?
+        public var rejected: UInt32 = 0
         public var aligned = false
         public var alignmentSamples = 0
         public var alignmentSpread: Float = 0
@@ -103,8 +105,11 @@ public final class RAVEBodyStreamSource: @unchecked Sendable {
         /// In the app's world once aligned, else in the hub's space.
         public var frame: RAVEBodyFrame
         public var isAligned: Bool
-        /// Seconds since it arrived.
+        /// Estimated capture-to-use age, including inference and network.
         public var age: Double
+        /// Capture time on the consumer's clock, for measurement-rate updates.
+        public var capturedAt: Double
+        public var alignmentRevision: UInt64
     }
 
     // MARK: State (all guarded by `lock`)
@@ -129,6 +134,14 @@ public final class RAVEBodyStreamSource: @unchecked Sendable {
     private var latestAt: Double = 0
     private var arrivals: [Double] = []
     private var dropped: UInt32 = 0
+    private var rejected: UInt32 = 0
+    private var bodyClock = RAVEBodyClock()
+    private var pendingPing: Double?
+    private var latestCapturedAt: Double = 0
+    private var alignmentRevision: UInt64 = 0
+    private var disagreementSince: Double?
+    private var retiredGenerations: [UInt64] = []
+    private var lastReferenceSent: Double = -1e9
     private var alignment = RAVEBodyAlignment()
     private var references: [Reference] = []
 
@@ -210,6 +223,11 @@ public final class RAVEBodyStreamSource: @unchecked Sendable {
         latest = nil
         references.removeAll()
         alignment.reset()
+        bodyClock = RAVEBodyClock()
+        pendingPing = nil
+        retiredGenerations.removeAll()
+        disagreementSince = nil
+        alignmentRevision &+= 1
         lock.unlock()
         timer?.cancel()
         browser?.cancel()
@@ -224,6 +242,9 @@ public final class RAVEBodyStreamSource: @unchecked Sendable {
     public func resetAlignment() {
         lock.lock()
         alignment.reset()
+        references.removeAll()
+        disagreementSince = nil
+        alignmentRevision &+= 1
         lock.unlock()
     }
 
@@ -231,13 +252,33 @@ public final class RAVEBodyStreamSource: @unchecked Sendable {
 
     /// Where the headset has the head and wrists now, in the app's world.
     /// Call every frame; any may be nil. `head` is the device's origin.
-    public func observe(head: SIMD3<Float>?, leftWrist: SIMD3<Float>?, rightWrist: SIMD3<Float>?, now: Double) {
+    public func observe(head: SIMD3<Float>?, leftWrist: SIMD3<Float>?, rightWrist: SIMD3<Float>?, now: Double,
+                        headRotation: simd_quatf? = nil) {
         lock.lock()
-        defer { lock.unlock() }
-        guard running else { return }
+        guard running else { lock.unlock(); return }
         references.append(Reference(time: now, head: head, leftWrist: leftWrist, rightWrist: rightWrist))
         if let first = references.first, now - first.time > 1.5 {
             references.removeAll { now - $0.time > 1.0 }
+        }
+        var reference: [UInt8]?
+        if now - lastReferenceSent >= 1 / 60, let head, let headRotation,
+           let fit = alignment.transform, let generation = latest?.generation,
+           now - latestCapturedAt <= configuration.staleAfter,
+           let time = bodyClock.hubTime(now, now: now) {
+            let inverse = simd_quatf(angle: -fit.yaw, axis: SIMD3<Float>(0, 1, 0))
+            func point(_ p: SIMD3<Float>) -> SIMD3<Float> { inverse.act(p - fit.translation) }
+            // ARKit's head looks down -Z, the body's head looks down +Z.
+            let rotation = simd_normalize(inverse * headRotation * simd_quatf(angle: .pi, axis: SIMD3<Float>(0, 1, 0)))
+            let ears = point(head) - rotation.act(RAVEBodyAlignment.headOffset)
+            reference = RAVEBodyStreamProtocol.reference(generation: generation, time: time,
+                head: RAVEBodyTrackerPose(position: ears, rotation: rotation, confidence: 1),
+                leftWrist: leftWrist.map(point), rightWrist: rightWrist.map(point))
+            lastReferenceSent = now
+        }
+        let connection = self.connection
+        lock.unlock()
+        if let reference, let connection {
+            connection.send(content: Data(reference), completion: .idempotent)
         }
     }
 
@@ -247,12 +288,14 @@ public final class RAVEBodyStreamSource: @unchecked Sendable {
     public func poll(now: Double) -> Reading? {
         lock.lock()
         defer { lock.unlock() }
-        guard let latest, now - latestAt <= configuration.staleAfter else { return nil }
+        guard let latest, now - latestCapturedAt <= configuration.staleAfter else { return nil }
+        let age = max(0, now - latestCapturedAt)
         if let fit = alignment.transform {
             return Reading(frame: latest.transformed(yaw: fit.yaw, translation: fit.translation), isAligned: true,
-                           age: now - latestAt)
+                           age: age, capturedAt: latestCapturedAt, alignmentRevision: alignmentRevision)
         }
-        return Reading(frame: latest, isAligned: false, age: now - latestAt)
+        return Reading(frame: latest, isAligned: false, age: age, capturedAt: latestCapturedAt,
+                       alignmentRevision: alignmentRevision)
     }
 
     public func status(now: Double) -> Status {
@@ -262,20 +305,22 @@ public final class RAVEBodyStreamSource: @unchecked Sendable {
         status.hub = hubName
         status.framesPerSecond = arrivals.filter { now - $0 <= 1 }.count
         status.dropped = dropped
+        status.rejected = rejected
+        status.clockUncertaintyMs = bodyClock.uncertainty(now: now).map { $0 * 1000 }
         status.aligned = alignment.isAligned
         status.alignmentSamples = alignment.sampleCount
         status.alignmentSpread = alignment.spreadMeters
         status.alignmentResidualCm = alignment.residual * 100
         if let latest {
             status.hubLatencyMs = latest.latency * 1000
-            status.frameAge = now - latestAt
+            status.frameAge = max(0, now - latestCapturedAt)
             status.joints = latest.joints.count
             status.trackers = latest.trackers.count
         }
         if !running {
             status.state = .idle
         } else if latest != nil {
-            status.state = now - latestAt <= configuration.staleAfter ? .receiving : .lost
+            status.state = now - latestCapturedAt <= configuration.staleAfter ? .receiving : .lost
         } else {
             status.state = connection == nil ? .searching : .waiting
         }
@@ -375,6 +420,12 @@ public final class RAVEBodyStreamSource: @unchecked Sendable {
         }
         let old = self.connection
         self.connection = connection
+        latest = nil
+        bodyClock = RAVEBodyClock()
+        pendingPing = nil
+        alignment.reset()
+        disagreementSince = nil
+        alignmentRevision &+= 1
         hubName = name
         connectedAt = clock()
         lock.unlock()
@@ -404,17 +455,29 @@ public final class RAVEBodyStreamSource: @unchecked Sendable {
     private func subscribe() {
         lock.lock()
         let connection = self.connection
+        let sent = clock()
+        pendingPing = sent
         lock.unlock()
         guard let connection, connection.state == .ready else { return }
         connection.send(content: Data(RAVEBodyStreamProtocol.subscribe(name: configuration.name)),
                         completion: .idempotent)
+        connection.send(content: Data(RAVEBodyStreamProtocol.ping(sentAt: sent)), completion: .idempotent)
     }
 
     private func receive(on connection: NWConnection) {
         connection.receiveMessage { [weak self, weak connection] data, _, _, error in
             guard let self, let connection else { return }
-            if let data, let frame = RAVEBodyStreamProtocol.decodeFrame([UInt8](data)) {
-                self.accept(frame, at: self.clock())
+            self.lock.lock()
+            let current = self.running && self.connection === connection
+            self.lock.unlock()
+            guard current else { return }
+            if let data {
+                let bytes = [UInt8](data), now = self.clock()
+                if let frame = RAVEBodyStreamProtocol.decodeFrame(bytes) {
+                    self.accept(frame, at: now)
+                } else if let pong = RAVEBodyStreamProtocol.decodePong(bytes) {
+                    self.accept(pong, at: now)
+                }
             }
             if error == nil, connection.state != .cancelled { self.receive(on: connection) }
         }
@@ -422,25 +485,65 @@ public final class RAVEBodyStreamSource: @unchecked Sendable {
 
     // MARK: Frames
 
+    func accept(_ pong: RAVEBodyStreamProtocol.Pong, at now: Double) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard pendingPing == pong.sent else { return }
+        pendingPing = nil
+        bodyClock.record(sent: pong.sent, received: now, hubReceived: pong.hubReceived, hubSent: pong.hubSent)
+    }
+
     func accept(_ frame: RAVEBodyFrame, at now: Double) {
         lock.lock()
         defer { lock.unlock() }
+        guard running, frame.captureTime.isFinite, frame.latency.isFinite, frame.latency >= 0 else { return }
+        if latest?.generation != nil, frame.generation == nil { return }
+        if let generation = frame.generation, retiredGenerations.contains(generation) { return }
+        let changedSpace = latest.map { $0.generation != frame.generation } ?? false
+        var capturedAt = (changedSpace ? nil : bodyClock.localTime(frame.captureTime, now: now))
+            ?? (now - Double(frame.latency) - configuration.networkDelay)
+        // Reject impossible future samples, allowing clock uncertainty.
+        let uncertainty = bodyClock.uncertainty(now: now) ?? 0.01
+        guard capturedAt <= now + uncertainty, frame.latency <= Float(configuration.staleAfter),
+              now - capturedAt <= configuration.staleAfter else {
+            rejected &+= 1
+            return
+        }
+        capturedAt = min(now - Double(frame.latency), capturedAt)
+        if changedSpace {
+            bodyClock = RAVEBodyClock()
+            if let generation = latest?.generation {
+                retiredGenerations.append(generation)
+                if retiredGenerations.count > 8 { retiredGenerations.removeFirst() }
+            }
+            alignment.reset()
+            disagreementSince = nil
+            alignmentRevision &+= 1
+        }
         if let latest {
-            // A frame overtaken in flight is a few behind and dropped; one far
-            // behind, or after a silence, is a restarted hub.
-            let behind = latest.sequence &- frame.sequence
-            if behind < 30, now - latestAt < 1 { return }
+            let ahead = Int32(bitPattern: frame.sequence &- latest.sequence)
+            // Extended hubs identify a restart explicitly. Legacy hubs can
+            // restart only after silence, never just because a packet is old.
+            let legacyRestart = frame.generation == nil && now - latestAt > 1
+            if !changedSpace && !legacyRestart && (ahead <= 0 || frame.captureTime <= latest.captureTime) { return }
+            if legacyRestart {
+                alignment.reset()
+                alignmentRevision &+= 1
+            }
             if frame.sequence &- latest.sequence > 1, frame.sequence &- latest.sequence < 300 {
                 dropped &+= frame.sequence &- latest.sequence &- 1
             }
         }
         latest = frame
         latestAt = now
+        latestCapturedAt = capturedAt
         arrivals.append(now)
         if arrivals.count > 240 { arrivals.removeFirst(arrivals.count - 240) }
-        pair(frame, seenAt: now - Double(frame.latency) - configuration.networkDelay)
+        pair(frame, seenAt: capturedAt)
         let wasAligned = alignment.isAligned
-        if alignment.maybeSolve(now: now), !wasAligned, let fit = alignment.transform {
+        let solved = alignment.maybeSolve(now: now)
+        if wasAligned && !alignment.isAligned { alignmentRevision &+= 1 }
+        if solved, !wasAligned, let fit = alignment.transform {
             log?("""
             body stream: aligned to the headset, \(Int((alignment.residual * 1000).rounded()), privacy: .public) mm RMS \
             over \(alignment.sampleCount, privacy: .public) pairs, yaw \(Int((fit.yaw * 180 / .pi).rounded()), privacy: .public)°
@@ -456,20 +559,37 @@ public final class RAVEBodyStreamSource: @unchecked Sendable {
         let span = b.time - a.time
         guard span > 0, span < 0.05 else { return }
         let t = Float((time - a.time) / span)
+        var errors: [Float] = []
+        func offer(_ anchor: RAVEBodyAlignment.Anchor, stream: SIMD3<Float>, world: SIMD3<Float>, confidence: Float) {
+            guard confidence >= RAVEBodyAlignment.minConfidence else { return }
+            if let error = alignment.error(stream: stream, world: world) { errors.append(error) }
+            alignment.addSample(anchor, stream: stream, world: world, weight: confidence, time: time)
+        }
         func at(_ key: KeyPath<Reference, SIMD3<Float>?>) -> SIMD3<Float>? {
             guard let p = a[keyPath: key], let q = b[keyPath: key],
                   simd_distance(p, q) / Float(span) <= configuration.pairMaxSpeed else { return nil }
             return simd_mix(p, q, SIMD3(repeating: t))
         }
-        if let world = at(\.head), let head = frame.trackers[.head] {
-            alignment.addSample(.head, stream: head.position + head.rotation.act(RAVEBodyAlignment.headOffset),
-                                world: world, weight: RAVEBodyAlignment.headWeight * head.confidence, time: time)
+        if !frame.headIsReference, let world = at(\.head), let head = frame.trackers[.head] {
+            offer(.head, stream: head.position + head.rotation.act(RAVEBodyAlignment.headOffset),
+                  world: world, confidence: RAVEBodyAlignment.headWeight * head.confidence)
         }
         if let world = at(\.leftWrist), let wrist = frame.joints[.leftWrist] {
-            alignment.addSample(.leftWrist, stream: wrist.position, world: world, weight: wrist.confidence, time: time)
+            offer(.leftWrist, stream: wrist.position, world: world, confidence: wrist.confidence)
         }
         if let world = at(\.rightWrist), let wrist = frame.joints[.rightWrist] {
-            alignment.addSample(.rightWrist, stream: wrist.position, world: world, weight: wrist.confidence, time: time)
+            offer(.rightWrist, stream: wrist.position, world: world, confidence: wrist.confidence)
+        }
+        guard !errors.isEmpty else { return }
+        if errors.sorted()[errors.count / 2] > 0.2 {
+            if disagreementSince == nil { disagreementSince = time }
+            if time - (disagreementSince ?? time) >= 0.5 {
+                alignment.reset()
+                disagreementSince = nil
+                alignmentRevision &+= 1
+            }
+        } else {
+            disagreementSince = nil
         }
     }
 }

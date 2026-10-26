@@ -44,6 +44,7 @@ public struct TrackedLegs: Sendable {
         /// back when it stops.
         public var fadeIn: Float = 0.25
         public var fadeOut: Float = 0.4
+        public var minConfidence: Float = 0.3
 
         public init() {}
     }
@@ -57,23 +58,33 @@ public struct TrackedLegs: Sendable {
         public var right: Foot?
         /// The floor's height in tracking space.
         public var floor: Float
+        /// Capture time, not the time this sample was polled. Nil preserves
+        /// the legacy one-measurement-per-update interface.
+        public var capturedAt: Double?
+        public var confidence: Float = 1
 
         public struct Foot: Sendable, Equatable {
+            public var knee: SIMD3<Float>? = nil
             public var ankle: SIMD3<Float>
             public var rotation: simd_quatf
+            public var confidence: Float
 
-            public init(ankle: SIMD3<Float>, rotation: simd_quatf) {
+            public init(ankle: SIMD3<Float>, rotation: simd_quatf, confidence: Float = 1) {
                 self.ankle = ankle
                 self.rotation = rotation
+                self.confidence = confidence
             }
         }
 
-        public init(pelvis: SIMD3<Float>, pelvisRotation: simd_quatf, left: Foot?, right: Foot?, floor: Float) {
+        public init(pelvis: SIMD3<Float>, pelvisRotation: simd_quatf, left: Foot?, right: Foot?, floor: Float,
+                    capturedAt: Double? = nil, confidence: Float = 1) {
             self.pelvis = pelvis
             self.pelvisRotation = pelvisRotation
             self.left = left
             self.right = right
             self.floor = floor
+            self.capturedAt = capturedAt
+            self.confidence = confidence
         }
     }
 
@@ -81,6 +92,8 @@ public struct TrackedLegs: Sendable {
     /// How much of the legs the tracking decides now, 0 to 1.
     public private(set) var weight: Float = 0
     public private(set) var lowerBody: PerformerLowerBody?
+    public var leftWeight: Float { feet[0].weight }
+    public var rightWeight: Float { feet[1].weight }
 
     private struct FootState: Sendable {
         var last: Input.Foot?
@@ -90,21 +103,29 @@ public struct TrackedLegs: Sendable {
         var planted = false
         var plantedAt = SIMD3<Float>.zero
         var lost: Float = 0
+        var weight: Float = 0
+        var sinceMeasurement: Float = 0
+        var capturedAt: Double?
     }
 
     private var feet = [FootState(), FootState()]
     private var last: Input?
+    private var lastCapture: Double?
 
     public init() {}
 
     /// Takes this frame's tracking (nil when there is none) and returns the
     /// lower body to pose, or nil once faded out entirely.
     @discardableResult
-    public mutating func update(_ input: Input?, deltaTime: Float) -> PerformerLowerBody? {
+    public mutating func update(_ input: Input?, deltaTime: Float,
+                                fallback: PerformerLowerBody? = nil) -> PerformerLowerBody? {
         let dt = max(deltaTime, 1e-4)
+        let input = input.flatMap { $0.confidence >= tuning.minConfidence ? $0 : nil }
+        let isNew = input != nil && (input?.capturedAt == nil || input?.capturedAt != lastCapture)
         if let input {
             weight = min(1, weight + (tuning.fadeIn > 0 ? dt / tuning.fadeIn : 1))
             last = input
+            if isNew { lastCapture = input.capturedAt }
         } else {
             weight = max(0, weight - (tuning.fadeOut > 0 ? dt / tuning.fadeOut : 1))
         }
@@ -112,35 +133,49 @@ public struct TrackedLegs: Sendable {
             if weight <= 0 { reset() }
             return nil
         }
-        // With no tracking at all the last frame is held, so its feet count as
-        // seen again: still, and planted if they were.
-        let left = step(&feet[0], input.map { $0.left } ?? feet[0].last, floor: frame.floor, dt: dt)
-        let right = step(&feet[1], input.map { $0.right } ?? feet[1].last, floor: frame.floor, dt: dt)
-        guard let left, let right else { return nil }
+        let left = step(&feet[0], input?.left, measured: isNew, capturedAt: input?.capturedAt, floor: frame.floor, dt: dt) ?? fallback?.left
+        let right = step(&feet[1], input?.right, measured: isNew, capturedAt: input?.capturedAt, floor: frame.floor, dt: dt) ?? fallback?.right
+        guard let left, let right else { lowerBody = nil; return nil }
         let body = PerformerLowerBody(pelvis: frame.pelvis, pelvisRotation: frame.pelvisRotation, left: left,
                                       right: right, floor: frame.floor, weight: weight)
         lowerBody = body
-        return body
+        guard let fallback else { return body }
+        // A lost foot returns to the gait independently. The pelvis and the
+        // other foot continue using measured motion.
+        var mixed = PerformerLowerBody.mix(fallback, body, weight)
+        mixed.left = PerformerLowerBody.mix(fallback, body, min(weight, leftWeight)).left
+        mixed.right = PerformerLowerBody.mix(fallback, body, min(weight, rightWeight)).right
+        mixed.weight = 1
+        return mixed
     }
 
     public mutating func reset() {
         feet = [FootState(), FootState()]
         last = nil
+        lastCapture = nil
         weight = 0
         lowerBody = nil
     }
 
     /// One foot's frame: tracked, held through a gap, or nil when it has
     /// never been seen.
-    private func step(_ state: inout FootState, _ seen: Input.Foot?, floor: Float, dt: Float) -> PerformerFoot? {
+    private func step(_ state: inout FootState, _ seen: Input.Foot?, measured: Bool, capturedAt: Double?, floor: Float, dt: Float) -> PerformerFoot? {
+        state.sinceMeasurement += dt
+        let seen = seen.flatMap { $0.confidence >= tuning.minConfidence ? $0 : nil }
         var foot: Input.Foot
-        if let seen {
-            if let previous = state.last, state.lost == 0 {
-                let velocity = (seen.ankle - previous.ankle) / dt
-                state.velocity += (velocity - state.velocity) * min(1, dt / 0.05)
+        if let seen, measured {
+            if let previous = state.last, state.lost <= tuning.hold {
+                let measuredInterval = capturedAt.flatMap { current in state.capturedAt.map { Float(current - $0) } }
+                let interval = max(measuredInterval ?? state.sinceMeasurement, 1e-4)
+                let velocity = (seen.ankle - previous.ankle) / interval
+                state.velocity += (velocity - state.velocity) * min(1, interval / 0.05)
             } else {
                 state.velocity = .zero
+                state.planted = false
+                state.lowest = nil
             }
+            state.sinceMeasurement = 0
+            state.capturedAt = capturedAt
             state.last = seen
             state.lost = 0
             foot = seen
@@ -148,10 +183,19 @@ public struct TrackedLegs: Sendable {
             // Held where it was last shown; past `hold` it no longer counts
             // as planted, since nothing says it still is.
             state.lost += dt
+            if state.lost > tuning.hold {
+                state.weight = max(0, state.weight - (tuning.fadeOut > 0 ? dt / tuning.fadeOut : 1))
+            } else if seen != nil {
+                state.weight = min(1, state.weight + (tuning.fadeIn > 0 ? dt / tuning.fadeIn : 1))
+            }
             guard let held = state.shown ?? state.last else { return nil }
-            return PerformerFoot(ankle: held.ankle, rotation: held.rotation,
-                                 planted: state.planted && state.lost <= tuning.hold)
+            var foot = PerformerFoot(ankle: held.ankle, rotation: held.rotation,
+                                     planted: state.planted && state.lost <= tuning.hold)
+            foot.knee = held.knee
+            return foot
         }
+
+        state.weight = min(1, state.weight + (tuning.fadeIn > 0 ? dt / tuning.fadeIn : 1))
 
         let height = foot.ankle.y - floor
         let lowest = min(state.lowest.map { $0 + tuning.lowestRelax * dt } ?? height, height)
@@ -170,7 +214,9 @@ public struct TrackedLegs: Sendable {
         }
         if state.planted { foot.ankle = state.plantedAt }
         state.shown = foot
-        return PerformerFoot(ankle: foot.ankle, rotation: foot.rotation, planted: state.planted)
+        var result = PerformerFoot(ankle: foot.ankle, rotation: foot.rotation, planted: state.planted)
+        result.knee = foot.knee
+        return result
     }
 }
 
@@ -187,8 +233,19 @@ extension PerformerLowerBody {
             return simd_slerp(p, to, t)
         }
         func foot(_ p: PerformerFoot, _ q: PerformerFoot) -> PerformerFoot {
-            PerformerFoot(ankle: simd_mix(p.ankle, q.ankle, SIMD3(repeating: t)), rotation: slerp(p.rotation, q.rotation),
+            var result = PerformerFoot(ankle: simd_mix(p.ankle, q.ankle, SIMD3(repeating: t)), rotation: slerp(p.rotation, q.rotation),
                           planted: t < 0.5 ? p.planted : q.planted, toeBend: p.toeBend + (q.toeBend - p.toeBend) * t)
+            if let a = p.knee, let b = q.knee {
+                result.knee = a + (b - a) * t
+                result.kneeWeight = p.kneeWeight + (q.kneeWeight - p.kneeWeight) * t
+            } else if let knee = q.knee {
+                result.knee = knee
+                result.kneeWeight = q.kneeWeight * t
+            } else if let knee = p.knee {
+                result.knee = knee
+                result.kneeWeight = p.kneeWeight * (1 - t)
+            }
+            return result
         }
         return PerformerLowerBody(pelvis: simd_mix(a.pelvis, b.pelvis, SIMD3(repeating: t)),
                                   pelvisRotation: slerp(a.pelvisRotation, b.pelvisRotation),

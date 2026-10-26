@@ -91,6 +91,42 @@ struct TrackedLegsTests {
         #expect(body?.left.planted == true)
     }
 
+    @Test("One lost foot fades independently and reacquires without a snap")
+    func independentFallback() throws {
+        var legs = TrackedLegs()
+        let fallback = PerformerLowerBody(pelvis: SIMD3(0, 0.9, 0), pelvisRotation: upright,
+            left: PerformerFoot(ankle: SIMD3(0.1, 0.08, 1), rotation: upright, planted: false),
+            right: PerformerFoot(ankle: SIMD3(-0.1, 0.08, 1), rotation: upright, planted: false), floor: 0)
+        for _ in 0..<60 {
+            legs.update(input(left: SIMD3(0.1, 0.08, 0), right: SIMD3(-0.1, 0.08, 0)), deltaTime: dt, fallback: fallback)
+        }
+        var result: PerformerLowerBody?
+        for _ in 0..<90 {
+            result = legs.update(input(left: nil, right: SIMD3(-0.1, 0.08, 0)), deltaTime: dt, fallback: fallback)
+        }
+        #expect(legs.leftWeight == 0)
+        #expect(legs.rightWeight == 1)
+        #expect(try #require(result).left.ankle.z == 1)
+        #expect(try #require(result).right.ankle.z == 0)
+        let recovery = legs.update(input(left: SIMD3(0.1, 0.2, 0), right: SIMD3(-0.1, 0.08, 0)),
+                                   deltaTime: dt, fallback: fallback)
+        let recovered = try #require(recovery)
+        #expect(recovered.left.ankle.z > 0.9)
+    }
+
+    @Test("Repeated polling does not refresh a camera measurement")
+    func measurementRate() {
+        var legs = TrackedLegs()
+        var sample = input(left: SIMD3(0.1, 0.08, 0), right: SIMD3(-0.1, 0.08, 0))
+        sample.capturedAt = 1
+        for _ in 0..<90 { legs.update(sample, deltaTime: 1 / 90) }
+        #expect(legs.leftWeight == 0)
+        sample.capturedAt = 2
+        legs.update(sample, deltaTime: 1 / 90)
+        #expect(legs.leftWeight > 0)
+        #expect(legs.leftWeight < 0.1)
+    }
+
     @Test("Mixing hands the legs over without a snap")
     func mix() {
         let a = PerformerLowerBody(pelvis: SIMD3(0, 0.9, 0), pelvisRotation: upright,

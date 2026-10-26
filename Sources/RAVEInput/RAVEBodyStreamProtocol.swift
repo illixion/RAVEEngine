@@ -37,6 +37,9 @@ public enum RAVEBodyStreamProtocol {
         case subscribe = 1
         case frame = 2
         case unsubscribe = 3
+        case ping = 4
+        case pong = 5
+        case reference = 6
     }
 
     static let headerSize = 6
@@ -51,6 +54,42 @@ public enum RAVEBodyStreamProtocol {
     }
 
     public static func unsubscribe() -> [UInt8] { header(.unsubscribe) }
+
+    public static func ping(sentAt: Double) -> [UInt8] {
+        header(.ping) + (0..<8).map { UInt8(truncatingIfNeeded: sentAt.bitPattern >> ($0 * 8)) }
+    }
+
+    public struct Pong: Sendable {
+        public var sent: Double
+        public var hubReceived: Double
+        public var hubSent: Double
+    }
+
+    public static func decodePong(_ bytes: [UInt8]) -> Pong? {
+        guard bytes.count == 30, Array(bytes[0..<4]) == magic,
+              bytes[4] == version, bytes[5] == Kind.pong.rawValue else { return nil }
+        var reader = Reader(bytes: bytes, at: headerSize)
+        let pong = Pong(sent: reader.f64(), hubReceived: reader.f64(), hubSent: reader.f64())
+        return [pong.sent, pong.hubReceived, pong.hubSent].allSatisfy(\.isFinite) ? pong : nil
+    }
+
+    /// Headset observations in the hub's space and clock. Head is between
+    /// the ears, using the stream's anatomical frame; wrists are optional.
+    public static func reference(generation: UInt64, time: Double, head: RAVEBodyTrackerPose,
+                                 leftWrist: SIMD3<Float>?, rightWrist: SIMD3<Float>?) -> [UInt8] {
+        var out = header(.reference)
+        func u64(_ bits: UInt64) { out += (0..<8).map { UInt8(truncatingIfNeeded: bits >> ($0 * 8)) } }
+        func f32(_ value: Float) { out += (0..<4).map { UInt8(truncatingIfNeeded: value.bitPattern >> ($0 * 8)) } }
+        func point(_ p: SIMD3<Float>) { f32(p.x); f32(p.y); f32(p.z) }
+        u64(generation)
+        u64(time.bitPattern)
+        out.append((leftWrist == nil ? 0 : 1) | (rightWrist == nil ? 0 : 2))
+        point(head.position)
+        for value in [head.rotation.imag.x, head.rotation.imag.y, head.rotation.imag.z, head.rotation.real] { f32(value) }
+        if let leftWrist { point(leftWrist) }
+        if let rightWrist { point(rightWrist) }
+        return out
+    }
 
     static func header(_ kind: Kind) -> [UInt8] { magic + [version, kind.rawValue] }
 
@@ -68,13 +107,15 @@ public enum RAVEBodyStreamProtocol {
         let height = reader.f32()
         let jointCount = Int(reader.u8())
         let trackerCount = Int(reader.u8())
+        guard captureTime.isFinite, latency.isFinite, latency >= 0,
+              height.isFinite, height > 0 else { return nil }
         guard bytes.count >= frameHeaderSize + jointCount * jointSize + trackerCount * trackerSize else { return nil }
         var joints: [RAVEBodyJoint: RAVEBodyJointSample] = [:]
         for _ in 0..<jointCount {
             let id = reader.u8()
             let confidence = Float(reader.u8()) / 255
             let position = reader.vector()
-            if let joint = RAVEBodyJoint(rawValue: id) {
+            if let joint = RAVEBodyJoint(rawValue: id), position.isFinite {
                 joints[joint] = RAVEBodyJointSample(position: position, confidence: confidence)
             }
         }
@@ -84,12 +125,21 @@ public enum RAVEBodyStreamProtocol {
             let confidence = Float(reader.u8()) / 255
             let position = reader.vector()
             let q = SIMD4<Float>(reader.f32(), reader.f32(), reader.f32(), reader.f32())
-            guard let role = RAVEBodyTrackerRole(rawValue: role), simd_length(q) > 0.5 else { continue }
+            let length = simd_length(q)
+            guard let role = RAVEBodyTrackerRole(rawValue: role), position.isFinite,
+                  length.isFinite, length > 0.5, length < 1.5 else { continue }
             trackers[role] = RAVEBodyTrackerPose(position: position, rotation: simd_normalize(simd_quatf(vector: q)),
                                                  confidence: confidence)
         }
-        return RAVEBodyFrame(sequence: sequence, captureTime: captureTime, latency: latency, height: height,
-                             calibrationLoaded: flags & 1 != 0, joints: joints, trackers: trackers)
+        var frame = RAVEBodyFrame(sequence: sequence, captureTime: captureTime, latency: latency, height: height,
+                                 calibrationLoaded: flags & 1 != 0, joints: joints, trackers: trackers)
+        frame.headIsReference = flags & 2 != 0
+        // Optional extension. Old v1 receivers ignore these trailing bytes.
+        if bytes.count >= reader.at + 12, Array(bytes[reader.at..<reader.at + 4]) == Array("PHX1".utf8) {
+            reader.at += 4
+            frame.generation = reader.u64()
+        }
+        return frame
     }
 
     /// Little-endian reads; the caller has checked the length.
@@ -192,6 +242,11 @@ public struct RAVEBodyTrackerPose: Sendable, Equatable {
 
 /// One fused skeleton.
 public struct RAVEBodyFrame: Sendable, Equatable {
+    /// Changes whenever the hub restarts or recalibrates its cameras.
+    public var generation: UInt64? = nil
+    /// The head tracker is a headset reference, not an independent camera
+    /// measurement. Do not feed it back into camera-space alignment.
+    public var headIsReference = false
     /// +1 per frame at the hub.
     public var sequence: UInt32
     /// When the cameras saw it, on the hub's clock (seconds). Useful only for
@@ -234,4 +289,8 @@ public struct RAVEBodyFrame: Sendable, Equatable {
         out.floor = floor + translation.y
         return out
     }
+}
+
+extension SIMD3 where Scalar == Float {
+    var isFinite: Bool { x.isFinite && y.isFinite && z.isFinite }
 }

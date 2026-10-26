@@ -62,6 +62,8 @@ public struct RAVEBodyAlignment: Sendable {
     public static let outlierMedians: Float = 3.0
     public static let outlierFloorMeters: Float = 0.04
     public static let robustPasses = 3
+    public static let maxResidualMeters: Float = 0.08
+    public static let minConfidence: Float = 0.3
     /// Where the headset's origin sits in the stream's head frame (+X left,
     /// +Y up, +Z forward), measured from between the ears: the eyes are about
     /// 8.5 cm in front of the ear canals and 2 cm above them.
@@ -127,6 +129,8 @@ public struct RAVEBodyAlignment: Sendable {
     @discardableResult
     public mutating func addSample(_ anchor: Anchor, stream: SIMD3<Float>, world: SIMD3<Float>,
                                    weight: Float = 1, time: Double) -> Bool {
+        guard stream.isFinite, world.isFinite, time.isFinite, weight.isFinite,
+              weight >= Self.minConfidence else { return false }
         if let last = lastKept[anchor], simd_distance_squared(world, last) < Self.minSpacingMeters * Self.minSpacingMeters {
             return false
         }
@@ -184,7 +188,16 @@ public struct RAVEBodyAlignment: Sendable {
             weights += s.weight * r
         }
         residual = weights > 0 ? (sum / weights).squareRoot() : 0
-        transform = fit
+        // A tiny cluster of inliers must not certify a mostly wrong fit.
+        let inliers = samples.filter { simd_distance(fit.apply($0.stream), $0.world) <= Self.maxResidualMeters * 1.5 }.count
+        transform = residual.isFinite && residual <= Self.maxResidualMeters && inliers * 10 >= samples.count * 7
+            ? fit : nil
+        if transform == nil {
+            // Do not make a moved camera wait sixty seconds for old pairs
+            // to age out. Keep the residual for diagnostics, collect afresh.
+            samples.removeAll()
+            lastKept.removeAll()
+        }
     }
 
     static func fit(_ samples: [Sample], _ robust: [Float]) -> Transform {

@@ -5,6 +5,10 @@ import simd
 
 /// One foot, as a tracker strapped to it would report it.
 public struct PerformerFoot: Sendable, Equatable {
+    /// Optional measured knee, with a separate contribution for fading it
+    /// against the normal bend direction. Never inferred from foot yaw.
+    public var knee: SIMD3<Float>? = nil
+    public var kneeWeight: Float = 1
     /// The ankle joint, in tracking space.
     public var ankle: SIMD3<Float>
     /// The foot's frame: +Z along the sole toward the toes, +Y up out of the
@@ -61,6 +65,38 @@ public struct PerformerLowerBody: Sendable, Equatable {
 }
 
 // MARK: - Walking from the head alone
+
+extension PerformerLowerBody {
+    /// Reflection across the performer's sagittal plane, with left/right
+    /// swapped. Mirrors, own bodies and cameras consume one solved body.
+    public func reflected(calibration: PerformerCalibration) -> PerformerLowerBody {
+        let body = PerformerRig.frame(up: SIMD3<Float>(0, 1, 0), forward: calibration.forward)
+        func point(_ p: SIMD3<Float>) -> SIMD3<Float> {
+            var v = body.inverse.act(p - calibration.neutralHips)
+            v.x = -v.x
+            let reflected = calibration.neutralHips + body.act(v)
+            return SIMD3(reflected.x, p.y, reflected.z)
+        }
+        func rotation(_ q: simd_quatf) -> simd_quatf {
+            let r = body.inverse * q
+            return simd_normalize(body * simd_quatf(ix: r.imag.x, iy: -r.imag.y, iz: -r.imag.z, r: r.real))
+        }
+        func foot(_ source: PerformerFoot) -> PerformerFoot {
+            var result = source
+            result.ankle = point(source.ankle)
+            result.rotation = rotation(source.rotation)
+            result.knee = source.knee.map(point)
+            return result
+        }
+        var result = self
+        result.pelvis = point(pelvis)
+        result.pelvisRotation = rotation(pelvisRotation)
+        result.left = foot(right)
+        result.right = foot(left)
+        result.armSwing = -armSwing
+        return result
+    }
+}
 
 /// A performer's legs, made up from the head alone, for someone who really
 /// walks: across the room, round it, up to the desk and back.

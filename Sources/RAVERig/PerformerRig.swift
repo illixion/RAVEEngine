@@ -61,6 +61,7 @@ public struct PerformerHand: Sendable, Equatable {
 /// One frame of a performer: the head, always, and whichever hands are in
 /// view.
 public struct PerformerFrame: Sendable, Equatable {
+    public var torso: PerformerTorso? = nil
     public var head: SIMD3<Float>
     /// The head's orientation in tracking space. The head looks along its own
     /// −Z with +Y up, as ARKit's device anchor does.
@@ -75,6 +76,13 @@ public struct PerformerFrame: Sendable, Equatable {
         self.left = left
         self.right = right
     }
+}
+
+public struct PerformerTorso: Sendable, Equatable {
+    /// Anatomical body frame (+X left, +Y up, +Z forward), in tracking space.
+    public var rotation: simd_quatf
+    public var weight: Float
+    public init(rotation: simd_quatf, weight: Float) { self.rotation = rotation; self.weight = weight }
 }
 
 /// Where the performer is when neutral, which way is "to camera", and how
@@ -884,7 +892,8 @@ public struct PerformerRig: Sendable {
         // The pelvis and the legs, when something says where they are: before
         // the spine, whose lean is measured from wherever the pelvis went.
         var pelvisShift = SIMD3<Float>.zero
-        if let lower = lowerBody, lower.weight > 0.001, !mirrored, hips != nil {
+        if let lowerBody, lowerBody.weight > 0.001, hips != nil {
+            let lower = mirrored ? lowerBody.reflected(calibration: calibration) : lowerBody
             let legPlacement = placement ?? ownBodyPlacement(calibration: calibration, pose: base)
             pelvisShift = poseLegs(lower, calibration: calibration, placement: legPlacement, performer: performer,
                                    report: &report, pose: &pose, model: &model)
@@ -915,8 +924,12 @@ public struct PerformerRig: Sendable {
             let lookBody = performer.inverse.act(headTurn.act(calibration.forward))
             let yaw = max(-tuning.torsoYawLimit,
                           min(tuning.torsoYawLimit, atan2(lookBody.x, lookBody.z) * tuning.torsoYawShare))
-            let torsoTracking = simd_normalize(lean * performer * simd_quatf(angle: yaw, axis: SIMD3<Float>(0, 1, 0))
+            var torsoTracking = simd_normalize(lean * performer * simd_quatf(angle: yaw, axis: SIMD3<Float>(0, 1, 0))
                                                * performer.inverse)
+            if let torso = frame.torso {
+                let measured = simd_normalize(torso.rotation * performer.inverse)
+                torsoTracking = simd_slerp(torsoTracking, measured, min(1, max(0, torso.weight)))
+            }
             bodyTurn = rotationToModel(torsoTracking)
 
             // The performer's shoulders ride the same torso.
@@ -1137,7 +1150,17 @@ public struct PerformerRig: Sendable {
             // direction a leg is never asked to reach along, so the bend
             // plane holds.
             let side: Float = index == 0 ? 1 : -1
-            let pole = simd_normalize(along + lateral * (0.25 * side))
+            var pole = simd_normalize(along + lateral * (0.25 * side))
+            if let knee = foot.knee {
+                let thigh = PoseSolver.translation(of: model[leg.thigh])
+                let axis = target - thigh
+                let delta = point(knee) - thigh
+                let bend = delta - axis * (simd_dot(delta, axis) / max(simd_length_squared(axis), 1e-6))
+                if simd_length(bend) > 0.01 {
+                    let blended = pole + (simd_normalize(bend) - pole) * min(1, max(0, foot.kneeWeight))
+                    if simd_length(blended) > 1e-5 { pole = simd_normalize(blended) }
+                }
+            }
             let reached = solver.solveLeg(chain: leg.chain, target: target, pole: pole, weight: weight,
                                           reachLimit: 0.999, pose: &pose, model: &model)
             if index == 0 { report.leftFootError = reached.error } else { report.rightFootError = reached.error }

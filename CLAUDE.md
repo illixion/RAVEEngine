@@ -324,12 +324,24 @@ VRChat OSC trackers).
 - **`RAVEBodyAlignment`**: the hub's space and the headset's are both gravity-aligned, so a 4-DoF fit
   (yaw + translation, 2D Kabsch, robust passes, 60 s ageing) maps one onto the other, from pairs the
   app gives away for free: the headset's head and wrists against the cameras'. A frame is 50–90 ms
-  old on arrival, so the source pairs it with where the headset had them *then* (its `latency` plus
-  `networkDelay`) and skips pairs from anchors moving over 1 m/s. No per-anchor offsets (unlike
+  old on arrival, so the source pairs it with where the headset had them *then* (clock-synchronized
+  capture time; `latency` plus `networkDelay` for older hubs) and skips pairs from anchors moving over 1 m/s. No per-anchor offsets (unlike
   `RAVEQuestCalibration`): a BlazePose wrist and an ARKit wrist are the same point, near enough,
   and the head's between-the-ears-to-eyes offset is a fixed estimate (`headOffset`).
-- **`TrackedLegs`** (RAVERig) turns the hips and feet into a `PerformerLowerBody`. The app does the
-  three-line glue between the two targets, which keeps RAVERig free of RAVEInput.
+- **`TrackedLegs`** (RAVERig) turns hips, feet and optional knees into a `PerformerLowerBody`.
+  Pass capture timestamps: repeated render polls must not count as new measurements. Its `fallback:`
+  argument blends lost feet independently back to the gait; `leftWeight`/`rightWeight` expose quality.
+- **`PerformerBodyTracking`** (RAVERig) is the common policy over source-independent
+  `PerformerBodyObservation`: headset head/hands win, cameras supply torso and hidden arms, and
+  `TrackedLegs` owns lower-body fallback. App adapters map RAVEInput joints into it; neither target
+  depends on the other. Camera wrists carry no finger observations. `PerformerRig` consumes torso,
+  knee directions and reflected lower bodies, so mirrors use the same motion as the own body/camera.
+- Extended hubs exchange clock pings, mark calibration generations, and accept time-matched headset
+  references. Call `observe(... headRotation:)` to contribute the real head to the hub's tracker
+  output. Raw camera wrists remain independent alignment measurements; a fused head never certifies
+  its own alignment. Fits require <=8 cm robust RMS and >=70% inliers; failed fits collect afresh.
+  Total pose age includes inference and network. Recalibration invalidates the consumer's limb state.
+  Protocol details and limitations live in `miscale/Tools/PoseHub/BODY_STREAM.md`.
 - Test against a real hub: `python -m posehub play <recording.jsonl>` there, then
   `RAVE_BODY_HUB=127.0.0.1:7711 swift test --filter liveHub` (or `RAVE_BODY_HUB=discover`).
 
