@@ -276,6 +276,36 @@ struct RAVEBodyStreamSourceTests {
         #expect(source.poll(now: 1.6) == nil)
         #expect(source.status(now: 1.6).state == .lost)
     }
+
+    /// The example on BODY_STREAM.md's status section, as the hub sends it.
+    static let statusJSON = #"""
+    {"state":"calibrating","prompt":"frame","text":"The camera 2 (Front Ultra Wide) can't see your feet: tilt it down or move it back","progress":0.4,"scale":null,"cameras":[{"label":"camera 1 (Back Camera)","device":"iPhone16,2","live":true,"fps":60.0,"framing":"ok","placed":false,"moved":false,"progress":0.55,"movement":0.7,"errorPx":null,"lens":"reported"},{"label":"camera 2 (Front Ultra Wide)","framing":"feet","progress":0.2,"later":"ignored"}],"generation":"9f0c2a7d11e04b5a"}
+    """#
+
+    @Test("Decodes the hub's setup status, ignoring keys it doesn't know")
+    func setupStatus() throws {
+        let datagram = RAVEBodyStreamProtocol.magic + [1, 7] + Array(Self.statusJSON.utf8)
+        let status = try #require(RAVEBodyStreamProtocol.decodeStatus(datagram))
+        #expect(status.knownState == .calibrating && status.prompt == "frame" && status.progress == 0.4)
+        #expect(status.scale == nil && status.generation == "9f0c2a7d11e04b5a")
+        #expect(status.cameras.count == 2)
+        #expect(status.cameras[0].live && status.cameras[0].framesPerSecond == 60 && status.cameras[0].note == "55%")
+        #expect(status.cameras[1].note == "feet cut off" && !status.cameras[1].live)
+        #expect(RAVEBodyStreamProtocol.decodeFrame(datagram) == nil)
+        #expect(RAVEBodyStreamProtocol.decodeStatus(RAVEBodyStreamProtocol.magic + [1, 7] + Array("[1]".utf8)) == nil)
+        #expect(RAVEBodyStreamProtocol.decodeStatus(bytes(hex: bodyStreamFixture)) == nil)
+    }
+
+    @Test("A source hands out the hub's status while it keeps coming")
+    func setupStatusLapses() throws {
+        let source = RAVEBodyStreamSource(clock: { 0 })
+        source.start()
+        defer { source.stop() }
+        let datagram = RAVEBodyStreamProtocol.magic + [1, 7] + Array(Self.statusJSON.utf8)
+        source.accept(try #require(RAVEBodyStreamProtocol.decodeStatus(datagram)), at: 1)
+        #expect(source.status(now: 2).setup?.prompt == "frame")
+        #expect(source.status(now: 4.5).setup == nil)
+    }
 }
 
 extension SIMD4<Float> {
@@ -311,5 +341,26 @@ struct RAVEBodyStreamLiveTests {
         #expect(status.framesPerSecond > 30)
         let reading = try #require(source.poll(now: clock()))
         #expect(reading.frame.trackers[.hips] != nil)
+    }
+
+    /// Against a hub still setting up (`python -m posehub serve --osc off`
+    /// with no cameras): `RAVE_BODY_HUB_SETUP=127.0.0.1:7711`. It sends no
+    /// frames yet, only its status.
+    @Test("Hears a hub that is still setting up", .enabled(if: ProcessInfo.processInfo.environment["RAVE_BODY_HUB_SETUP"] != nil))
+    func liveHubSetup() async throws {
+        let parts = (ProcessInfo.processInfo.environment["RAVE_BODY_HUB_SETUP"] ?? "").split(separator: ":")
+        var configuration = RAVEBodyStreamSource.Configuration(name: "RAVEInputTests")
+        configuration.hub = .address(host: String(parts[0]), port: parts.count > 1 ? UInt16(parts[1])! : 7711)
+        let source = RAVEBodyStreamSource(configuration: configuration)
+        source.start()
+        defer { source.stop() }
+        var setup: RAVEBodyHubStatus?
+        for _ in 0..<50 where setup == nil {
+            try await Task.sleep(for: .milliseconds(100))
+            setup = source.status(now: ProcessInfo.processInfo.systemUptime).setup
+        }
+        let status = try #require(setup)
+        print("live hub setup: [\(status.state)] \(status.text)")
+        #expect(status.knownState == .waiting && status.prompt == "addCameras")
     }
 }

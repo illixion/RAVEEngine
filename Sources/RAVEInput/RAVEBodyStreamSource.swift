@@ -96,6 +96,9 @@ public final class RAVEBodyStreamSource: @unchecked Sendable {
         public var joints = 0
         public var trackers = 0
         public var dropped: UInt32 = 0
+        /// The hub's setup state and prompt, while it keeps sending them
+        /// (nil after 3 s of silence, or from a hub that predates them).
+        public var setup: RAVEBodyHubStatus?
 
         public init() {}
     }
@@ -132,6 +135,11 @@ public final class RAVEBodyStreamSource: @unchecked Sendable {
     private var connectedAt: Double = 0
     private var latest: RAVEBodyFrame?
     private var latestAt: Double = 0
+    /// Anything from the hub (frame, pong, status): it is reachable here,
+    /// even before it has a calibration to send frames from.
+    private var heardAt: Double = 0
+    private var setup: RAVEBodyHubStatus?
+    private var setupAt: Double = 0
     private var arrivals: [Double] = []
     private var dropped: UInt32 = 0
     private var rejected: UInt32 = 0
@@ -221,6 +229,8 @@ public final class RAVEBodyStreamSource: @unchecked Sendable {
         hubName = nil
         candidates.removeAll()
         latest = nil
+        setup = nil
+        heardAt = 0
         references.removeAll()
         alignment.reset()
         bodyClock = RAVEBodyClock()
@@ -311,6 +321,7 @@ public final class RAVEBodyStreamSource: @unchecked Sendable {
         status.alignmentSamples = alignment.sampleCount
         status.alignmentSpread = alignment.spreadMeters
         status.alignmentResidualCm = alignment.residual * 100
+        if now - setupAt <= 3 { status.setup = setup }
         if let latest {
             status.hubLatencyMs = latest.latency * 1000
             status.frameAge = max(0, now - latestCapturedAt)
@@ -377,7 +388,7 @@ public final class RAVEBodyStreamSource: @unchecked Sendable {
     private func tick() {
         let now = clock()
         lock.lock()
-        let quiet = connection != nil && now - max(connectedAt, latestAt) > Self.candidateTimeout
+        let quiet = connection != nil && now - max(connectedAt, latestAt, heardAt) > Self.candidateTimeout
         var next: (endpoint: NWEndpoint, name: String)?
         if quiet, candidates.count > 1 {
             candidate = (candidate + 1) % candidates.count
@@ -421,6 +432,8 @@ public final class RAVEBodyStreamSource: @unchecked Sendable {
         let old = self.connection
         self.connection = connection
         latest = nil
+        setup = nil
+        heardAt = 0
         bodyClock = RAVEBodyClock()
         pendingPing = nil
         alignment.reset()
@@ -477,6 +490,8 @@ public final class RAVEBodyStreamSource: @unchecked Sendable {
                     self.accept(frame, at: now)
                 } else if let pong = RAVEBodyStreamProtocol.decodePong(bytes) {
                     self.accept(pong, at: now)
+                } else if let status = RAVEBodyStreamProtocol.decodeStatus(bytes) {
+                    self.accept(status, at: now)
                 }
             }
             if error == nil, connection.state != .cancelled { self.receive(on: connection) }
@@ -485,9 +500,19 @@ public final class RAVEBodyStreamSource: @unchecked Sendable {
 
     // MARK: Frames
 
+    func accept(_ status: RAVEBodyHubStatus, at now: Double) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard running else { return }
+        setup = status
+        setupAt = now
+        heardAt = now
+    }
+
     func accept(_ pong: RAVEBodyStreamProtocol.Pong, at now: Double) {
         lock.lock()
         defer { lock.unlock() }
+        heardAt = now
         guard pendingPing == pong.sent else { return }
         pendingPing = nil
         bodyClock.record(sent: pong.sent, received: now, hubReceived: pong.hubReceived, hubSent: pong.hubSent)

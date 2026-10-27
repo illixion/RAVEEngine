@@ -342,8 +342,15 @@ VRChat OSC trackers).
   its own alignment. Fits require <=8 cm robust RMS and >=70% inliers; failed fits collect afresh.
   Total pose age includes inference and network. Recalibration invalidates the consumer's limb state.
   Protocol details and limitations live in `miscale/Tools/PoseHub/BODY_STREAM.md`.
+- **Setup status** (`RAVEBodyHubStatus`, `Status.setup`): the hub calibrates its cameras by itself and
+  sends its state, one prompt (code and English text) and a line per camera (framing, placed, moved,
+  progress) twice a second, before it has any frames to send. Show it as it comes, so setup reads the
+  same in every app; a source counts any datagram as the hub being reachable. Only a full recalibration
+  or a headset scale correction changes the space (new generation); a camera joining later doesn't.
 - Test against a real hub: `python -m posehub play <recording.jsonl>` there, then
-  `RAVE_BODY_HUB=127.0.0.1:7711 swift test --filter liveHub` (or `RAVE_BODY_HUB=discover`).
+  `RAVE_BODY_HUB=127.0.0.1:7711 swift test --filter liveHub` (or `RAVE_BODY_HUB=discover`); a
+  camera-less `posehub serve --osc off` and `RAVE_BODY_HUB_SETUP=127.0.0.1:7711 --filter liveHubSetup`
+  for the status.
 
 **Unverified on device:** the alignment against a real headset, the head offset, and whether
 BlazePose still sees the face under a headset (the head pair only; wrists carry the fit).
