@@ -32,7 +32,7 @@
  └──────────────────────────────────────────────────────────────────────────┘
  */
 
-import DebugTrace
+import DebugLog
 import Foundation
 import Network
 import simd

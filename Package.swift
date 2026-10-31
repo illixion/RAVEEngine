@@ -22,14 +22,17 @@ let package = Package(
         .library(name: "RAVEPanel", targets: ["RAVEPanel"]),
     ],
     // The one external dependency: RAVEInput hands its diagnostics over as
-    // DebugTrace log messages, so each value keeps its own privacy (a Quest's
-    // address and name stay private, calibration numbers public). DebugTrace
-    // links neither RAVE package. See ~/Projects/CLAUDE.md.
+    // log messages, so each value keeps its own privacy (a Quest's address and
+    // name stay private, calibration numbers public). It links only DebugTrace's
+    // small `DebugLog` product (the message type and logger, no dependencies),
+    // not the trace builder, registry or server: an app that links DebugTrace
+    // gets these lines in its console and traces anyway. DebugTrace links
+    // neither RAVE package. See ~/Projects/CLAUDE.md.
     dependencies: [
         .package(path: "../DebugTrace"),
     ],
     targets: [
-        .target(name: "RAVEInput", dependencies: [.product(name: "DebugTrace", package: "DebugTrace")]),
+        .target(name: "RAVEInput", dependencies: [.product(name: "DebugLog", package: "DebugTrace")]),
         .testTarget(name: "RAVEInputTests", dependencies: ["RAVEInput"]),
         .target(name: "RAVEDiagnostics"),
         .testTarget(name: "RAVEDiagnosticsTests", dependencies: ["RAVEDiagnostics"]),

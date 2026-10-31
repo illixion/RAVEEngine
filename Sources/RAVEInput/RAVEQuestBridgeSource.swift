@@ -68,7 +68,7 @@
  BSD broadcast socket here would buy nothing without the entitlement.
  */
 
-import DebugTrace
+import DebugLog
 import Foundation
 import Network
 import simd

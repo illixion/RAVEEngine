@@ -31,7 +31,7 @@
 
 import ARKit
 import CoreHaptics
-import DebugTrace
+import DebugLog
 import Foundation
 import GameController
 import QuartzCore

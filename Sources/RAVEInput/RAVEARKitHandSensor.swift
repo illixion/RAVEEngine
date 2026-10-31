@@ -21,7 +21,7 @@
 #if os(visionOS)
 
 import ARKit
-import DebugTrace
+import DebugLog
 import Foundation
 import QuartzCore
 import simd

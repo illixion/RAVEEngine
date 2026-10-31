@@ -425,8 +425,9 @@ user's bindings.
 
 ## Logging
 
-RAVEInput is the one target that logs, and it has the package's only external dependency,
-`../DebugTrace`. Its sources take a `log:` closure of `DebugLogMessage`, not `String`, so each
+RAVEInput is the one target that logs, and it has the package's only external dependency:
+`../DebugTrace`, through its small `DebugLog` product (the message type and `DebugLogger`;
+no dependencies, so none of the trace builder, registry or server comes with it). Its sources take a `log:` closure of `DebugLogMessage`, not `String`, so each
 value keeps its own privacy through the app's `DebugLogger`: a Quest's address (hashed),
 advertised name, controller vendor names and error text stay private, while counts,
 calibration figures and error codes are public. Apps forward the message as it is
