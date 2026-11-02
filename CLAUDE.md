@@ -395,8 +395,8 @@ engine-neutral: nothing here names Half-Life, Xash or a game's commands.
 - **`RAVEThumbGestures` / `RAVEThumbContact`**: reload hold and alt-fire (see the file header
   for the four rules that tell them apart). The caller measures a frame
   (`RAVEHandSample.indexExtensionRatio`, `thumbExtensionRatio`, `RAVEThumbContact.measure`)
-  and passes `nil` while the gestures may not run. Thresholds are Lambda's, **unverified on
-  device** since the move.
+  and passes `nil` while the gestures may not run. Thresholds are LambdaVision's, unchanged by the
+  move and extensively tested on a Vision Pro there.
 - **`RAVEArmSwingLocomotion`**: the opt-in policy around `RAVEArmSwinger`. **Off by default**.
   It does not arbitrate hands: `wantsHand(_:)` feeds a `RAVEHandOwnership` claim.
 - **`RAVERadialMenu`** (`RAVERadialEntry<Action>`, `RAVERadial` geometry, `RAVERadialHandMenu`,
@@ -421,7 +421,11 @@ no longer mentions. The same check run on these files finds none either. Lambda 
 written in a clean room, so this is evidence, not a guarantee. Not moved because they are
 Half-Life shaped: `KeyboardInput`'s engine key numbers, `GamepadInput`'s `+command` binds,
 `HandMovement`'s train and jump glue, `JumpSequencer`, `WeaponWheel`, `FreeAim` (one consumer,
-no Xash in it; move it when a second app aims a held gun). `WeaponWheel` was first left
+no Xash in it; move it when a second app aims a held gun). **LambdaVision now consumes all of
+the above** (2026-11-02): its `MouseSmoothing.swift` and `ThumbGestures.swift` are gone, its
+`InputMode`, `WeaponWheel` gesture and gamepad wheel, finger-gun trigger and arm-swing policy
+are these types under typealiases, and `KeyboardInput` sits on `RAVEKeyboardSource`. The
+numbers did not change. `WeaponWheel` was first left
 behind as Half-Life shaped; only its contents are (slots, weapon names, the commands), and its
 menu half moved as `RAVERadialMenu` the same day. What stays in Lambda: the slot/weapon entries
 it feeds in, `command(for:)` and `perform`, and `WeaponWheelPanel`.

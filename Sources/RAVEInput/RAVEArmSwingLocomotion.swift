@@ -89,6 +89,10 @@ public struct RAVEArmSwingLocomotion: Sendable {
         return output
     }
 
+    /// The gun hand's partner was a fist on the last update. For diagnostics;
+    /// `wantsHand(_:)` is the rule that uses it.
+    public var partnerIsFist: Bool { partnerFist }
+
     /// Whether the swing wants `hand` this frame. See the header: a hand that
     /// is swinging, and — before a run starts — the gun hand whose partner is
     /// already a fist.
