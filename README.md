@@ -86,6 +86,8 @@ rather than leaving every app to:
 | `RAVEStickShaping`, `RAVESnapTurnDetector` | radial/axial deadzones with rescale; snap turns with hysteresis and optional repeat |
 | `RAVEEdgeTracker(debounce:)` | debounced press/release edges |
 | `RAVEThumbGestures` | the gun hand's reload hold and thumb-to-middle-finger alt-fire, told apart by where on the finger the thumb lands, with mutual locks and guards against fists and pinches |
+| `RAVERadialMenu` (`RAVERadialHandMenu`, `RAVERadialStickMenu`) | a radial menu over the app's own entries: sector arming with stickiness, confirm holds for risky picks, nested members opened by pushing past the rim; driven by a four-fingertip pinch or by a held button and a stick |
+| `RAVEFingerGunTrigger` | the finger gun's trigger: curl to pull, extend to release, hold inside the band, and release at once when the hand is lost or anything else owns it |
 | `RAVEArmSwingLocomotion` | arm-swing walking as an option: **off until a game sets `isEnabled`**, with sensitivity, head or hand direction, stand-down, and `wantsHand(_:)` for claiming the hand through `RAVEHandOwnership` |
 
 `RAVEHandJoystick` gained optional wrist-offset smoothing and an axial deadzone (both off

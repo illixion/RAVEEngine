@@ -166,7 +166,7 @@ loop. The other consumers drive the same code from `@MainActor`. So:
 
 - `RAVEPinchDetector`, `RAVEHandJoystick`, `RAVEArmSwinger`, `RAVEPalmGeometry`, `RAVEEdgeTracker`,
   `RAVEGestureGate`, `RAVEPalmFacingGate`, `RAVEHandOwnership`, `RAVESystemPinchGate`,
-  `RAVEStickShaping`/`RAVESnapTurnDetector`, `RAVEMotionSmoother`, `RAVEInputModeSelector`/`RAVEHeldCommands`, `RAVEThumbGestures`, `RAVEArmSwingLocomotion`, `RAVESampleSeries`, `RAVEQuestCalibration`,
+  `RAVEStickShaping`/`RAVESnapTurnDetector`, `RAVEMotionSmoother`, `RAVEInputModeSelector`/`RAVEHeldCommands`, `RAVEThumbGestures`, `RAVEArmSwingLocomotion`, `RAVERadialHandMenu`/`RAVERadialStickMenu`, `RAVEFingerGunTrigger`, `RAVESampleSeries`, `RAVEQuestCalibration`,
   `RAVEQuestHoldDetector`, `RAVEQuestAlignment`, `RAVEQuestBridgeProtocol`, `RAVEGamepadSnapshot` are **isolation-free value types**
 - `RAVEMetricCollector` and `RAVEQuestBridgeSource` are **lock-guarded classes**, `@unchecked
   Sendable` — an actor would make `record()` / `poll()` async and unusable from exactly the
@@ -399,6 +399,18 @@ engine-neutral: nothing here names Half-Life, Xash or a game's commands.
   device** since the move.
 - **`RAVEArmSwingLocomotion`**: the opt-in policy around `RAVEArmSwinger`. **Off by default**.
   It does not arbitrate hands: `wantsHand(_:)` feeds a `RAVEHandOwnership` claim.
+- **`RAVERadialMenu`** (`RAVERadialEntry<Action>`, `RAVERadial` geometry, `RAVERadialHandMenu`,
+  `RAVERadialStickMenu`, `RAVERadialView`): LambdaVision's weapon wheel with the weapons taken
+  out. Generic over the app's `Action`; it knows sectors, arming, confirm holds and nested
+  members, not what a pick does. The hand driver opens on all four fingertips pinched to the
+  thumb (a fist gate keeps a clenched hand out), the stick driver on a held button; both hand
+  a drawer one `RAVERadialView`. **Aim tests at sector centres**: 3 o'clock is the boundary
+  between sectors 0 and 1 of four, so a test there is a float-rounding coin flip. The drawer
+  stays the app's (LambdaVision's is `WeaponWheelPanel` over RAVEHolo).
+- **`RAVEFingerGunTrigger`**: curl the index to pull, extend to release, hold inside the band.
+  Releases at once on a lost hand or when anything else owns it, so fire cannot stick. Returns
+  a `RAVEEdge` so an engine bridge sends a command only on a change. Share the one threshold
+  pair with `RAVEThumbGestures.Tuning` (`indexCurled`/`indexExtended`).
 
 **Provenance.** Written in LambdaVision (GPL-3.0, with Xash3D and hlsdk vendored beside it) by
 the owner with Claude, then re-expressed here under MIT with the engine specifics removed.
@@ -409,7 +421,10 @@ no longer mentions. The same check run on these files finds none either. Lambda 
 written in a clean room, so this is evidence, not a guarantee. Not moved because they are
 Half-Life shaped: `KeyboardInput`'s engine key numbers, `GamepadInput`'s `+command` binds,
 `HandMovement`'s train and jump glue, `JumpSequencer`, `WeaponWheel`, `FreeAim` (one consumer,
-no Xash in it; move it when a second app aims a held gun).
+no Xash in it; move it when a second app aims a held gun). `WeaponWheel` was first left
+behind as Half-Life shaped; only its contents are (slots, weapon names, the commands), and its
+menu half moved as `RAVERadialMenu` the same day. What stays in Lambda: the slot/weapon entries
+it feeds in, `command(for:)` and `perform`, and `WeaponWheelPanel`.
 
 ### Mouse catcher (immersive spaces)
 
