@@ -166,7 +166,7 @@ loop. The other consumers drive the same code from `@MainActor`. So:
 
 - `RAVEPinchDetector`, `RAVEHandJoystick`, `RAVEArmSwinger`, `RAVEPalmGeometry`, `RAVEEdgeTracker`,
   `RAVEGestureGate`, `RAVEPalmFacingGate`, `RAVEHandOwnership`, `RAVESystemPinchGate`,
-  `RAVEStickShaping`/`RAVESnapTurnDetector`, `RAVESampleSeries`, `RAVEQuestCalibration`,
+  `RAVEStickShaping`/`RAVESnapTurnDetector`, `RAVEMotionSmoother`, `RAVEInputModeSelector`/`RAVEHeldCommands`, `RAVEThumbGestures`, `RAVEArmSwingLocomotion`, `RAVESampleSeries`, `RAVEQuestCalibration`,
   `RAVEQuestHoldDetector`, `RAVEQuestAlignment`, `RAVEQuestBridgeProtocol`, `RAVEGamepadSnapshot` are **isolation-free value types**
 - `RAVEMetricCollector` and `RAVEQuestBridgeSource` are **lock-guarded classes**, `@unchecked
   Sendable` — an actor would make `record()` / `poll()` async and unusable from exactly the
@@ -372,6 +372,44 @@ a second press of a held button), and the lock-guarded `RAVEMouseMotionAccumulat
 thread draining per-frame motion. Speed curves, wheel clamps, Y inversion and wire encodings stay
 in the apps. Converged from LambdaVision's `MouseInput` and Longwave's `MoonlightMouseManager` /
 `MacNativeMouseBridge` (2026-10-06); the GameController half is unverified on device.
+
+### Input mode, keyboard, smoothing, thumb gestures (2026-11-02)
+
+Moved out of LambdaVision's app code so a second consumer (Northstar) can link them. All
+engine-neutral: nothing here names Half-Life, Xash or a game's commands.
+
+- **`RAVEInputMode`** (`RAVEInputModeSelector`, `RAVEInputModeSetting`, `RAVEInputHandoff`,
+  `RAVEHeldCommands`, and the lock-guarded `RAVEInputModeArbiter`): one owner among hands,
+  keyboard+mouse and gamepad. A device used takes the mode; hands come back on a deliberate
+  hand action only after `handsReclaimSeconds` with no device touched; idle never flips it. A
+  handoff says what the old owner lets go of. **The game maps `unstickKeyboardMoves` to its
+  own stop-moving commands**: LambdaVision's list was `-forward -back -moveleft ...`, an
+  engine detail that stayed behind.
+- **`RAVEKeyboardSource` / `RAVEKeyCharacters`**: `GCKeyboard` attach, held keys, shift,
+  `isInUse(now:)` (stand hand gestures down while hands rest on keys), and the US-layout ASCII
+  table. A key's meaning to a game (an engine's key numbers, snap-turn keys) stays in the app.
+  Needs a window under the pointer or the mouse catcher on visionOS to receive anything.
+- **`RAVEMotionSmoother` / `RAVEEventIntervalStats`**: two critically damped stages that
+  conserve every count, for GCMouse's uneven delivery on visionOS. Smoothing is the app's
+  choice; `RAVEMouseMotionAccumulator` still drains the raw motion.
+- **`RAVEThumbGestures` / `RAVEThumbContact`**: reload hold and alt-fire (see the file header
+  for the four rules that tell them apart). The caller measures a frame
+  (`RAVEHandSample.indexExtensionRatio`, `thumbExtensionRatio`, `RAVEThumbContact.measure`)
+  and passes `nil` while the gestures may not run. Thresholds are Lambda's, **unverified on
+  device** since the move.
+- **`RAVEArmSwingLocomotion`**: the opt-in policy around `RAVEArmSwinger`. **Off by default**.
+  It does not arbitrate hands: `wantsHand(_:)` feeds a `RAVEHandOwnership` claim.
+
+**Provenance.** Written in LambdaVision (GPL-3.0, with Xash3D and hlsdk vendored beside it) by
+the owner with Claude, then re-expressed here under MIT with the engine specifics removed.
+Before the move, every Lambda app file was compared against the vendored GPL trees (token
+shingles, verbatim lines, comments, strings, identifiers): no verbatim lines, comment
+sentences or strings, and the only shared identifiers were engine API names the moved code
+no longer mentions. The same check run on these files finds none either. Lambda was not
+written in a clean room, so this is evidence, not a guarantee. Not moved because they are
+Half-Life shaped: `KeyboardInput`'s engine key numbers, `GamepadInput`'s `+command` binds,
+`HandMovement`'s train and jump glue, `JumpSequencer`, `WeaponWheel`, `FreeAim` (one consumer,
+no Xash in it; move it when a second app aims a held gun).
 
 ### Mouse catcher (immersive spaces)
 

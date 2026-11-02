@@ -85,6 +85,8 @@ rather than leaving every app to:
 | `RAVESystemPinchGate` | the system gesture owns thumb+index; hand-tracker world actions wait it out |
 | `RAVEStickShaping`, `RAVESnapTurnDetector` | radial/axial deadzones with rescale; snap turns with hysteresis and optional repeat |
 | `RAVEEdgeTracker(debounce:)` | debounced press/release edges |
+| `RAVEThumbGestures` | the gun hand's reload hold and thumb-to-middle-finger alt-fire, told apart by where on the finger the thumb lands, with mutual locks and guards against fists and pinches |
+| `RAVEArmSwingLocomotion` | arm-swing walking as an option: **off until a game sets `isEnabled`**, with sensitivity, head or hand direction, stand-down, and `wantsHand(_:)` for claiming the hand through `RAVEHandOwnership` |
 
 `RAVEHandJoystick` gained optional wrist-offset smoothing and an axial deadzone (both off
 by default), and `RAVEHandSample` size-normalised metrics (`palmLength`,
