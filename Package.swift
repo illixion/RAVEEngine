@@ -20,6 +20,7 @@ let package = Package(
         .library(name: "RAVERig", targets: ["RAVERig"]),
         .library(name: "RAVEHolo", targets: ["RAVEHolo"]),
         .library(name: "RAVEPanel", targets: ["RAVEPanel"]),
+        .library(name: "RAVESharedSpace", targets: ["RAVESharedSpace"]),
     ],
     // The one external dependency: RAVEInput hands its diagnostics over as
     // log messages, so each value keeps its own privacy (a Quest's address and
@@ -64,5 +65,15 @@ let package = Package(
         // visionOS-only. Content-agnostic: never imports RAVESDK.
         .target(name: "RAVEPanel", dependencies: ["RAVEInput"]),
         .testTarget(name: "RAVEPanelTests", dependencies: ["RAVEPanel"]),
+        // Several apps sharing one immersive space as modules of one process
+        // (Nexus), since visionOS shows only the space-owning app's windows.
+        // The broker opens the space while anyone wants it, the policy settles
+        // its single immersion style, arm visibility and surroundings, one
+        // ARKit session serves everyone, and each module's content sits under
+        // its own root with taps routed back to it. Policy and broker are
+        // framework-free and host-tested; the space itself is visionOS-only.
+        // Logs through DebugLog like RAVEInput.
+        .target(name: "RAVESharedSpace", dependencies: [.product(name: "DebugLog", package: "DebugTrace")]),
+        .testTarget(name: "RAVESharedSpaceTests", dependencies: ["RAVESharedSpace"]),
     ]
 )

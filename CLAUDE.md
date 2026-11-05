@@ -57,6 +57,7 @@ sits behind `RAVEHandInputProvider`, which returns `RAVENoHandInput` off-visionO
 | `RAVERig` | Skeleton geometry, humanoid inference, FABRIK, pose solving, leg stepping, a tracked performer driving a humanoid (`PerformerRig`, head + hands, mirrored or not, or placed as the performer's own body so its hands land on theirs, legs folded when they sit, legs walking from a `PerformerLowerBody`), and that lower body made up from the head (`PerformerGait`: steps in time with the head's bob; its pelvis and feet are tracker poses, meant for Longwave's PC VR too), and that lower body measured (`TrackedLegs`: planted feet pinned, gaps held, faded against the gait with `PerformerLowerBody.mix`) — shipping, see README |
 | `RAVEHolo` | In-world holographic UI for Metal hosts: SDF glyph atlas (CoreText, no font shipped), panel/gauge/text scene, Metal 4 renderer drawing into a pass the host owns. Shader source compiles at runtime (SwiftPM's CLI builds no `.metal`); `RAVEHOLO_SNAPSHOT=/x.png swift test --filter RAVEHolo` renders a sample panel to look at. Renderer is `@available(macOS 26)` (Metal 4) without raising the package floor. Also interactive: pinchable targets (Compositor Services tracking areas + a CPU ray hit-test), widgets/stack layout, and a palm anchor (`RAVEHoloPalmAnchor`, an alias of RAVEInput's `RAVEPalmAnchor`, shared with `RAVEPanel`) — see "RAVEHolo: interactive panels". Depends on `RAVEInput` for the anchor only. Consumers: LambdaVision (HEV HUD + developer palm debug panel), Oneiros (Metal-host wrist HUD) |
 | `RAVEPanel` | Any SwiftUI view as a panel in a RealityKit scene: chrome, the attachment hosting fix, world / palm / head-follow placing, and a visibility verdict to pause content by. Rules host-tested, entity half visionOS-only. Depends on `RAVEInput` for the palm anchor. See "About `RAVEPanel`". Consumers: spatial-ai-character, Longwave |
+| `RAVESharedSpace` | Several apps in one immersive space as modules of one process: `RAVESpaceModule` (what an app implements: content under a root the host gives it), `RAVESpaceBroker` (open while anyone wants it), `RAVESpacePolicy` (the space's one immersion style, arm visibility and surroundings, from all members), `RAVESpatialServices` (one ARKit session), `RAVESpaceHost`/`RAVESpaceView` (per-module roots, taps routed to their module). Policy and broker host-tested. Consumer: Nexus. See "About `RAVESharedSpace`" |
 | `RAVEPCVR` | Planned — see "About the planned RAVEPCVR target" below before touching this |
 
 **"XR/game-shaped" is the real scope, not the acronym.** Robot-Assisted Vision Enhancements
@@ -154,6 +155,32 @@ palm HUD (`WristHUDDriver` in `FoveatedImmersiveView.swift`) onto it in the same
 the target starts with two real consumers. Longwave's risk to measure first: the frame and
 power cost of a live page inside the foveated PCVR space (`ImmersiveSpace(foveatedStreaming:)`
 with RealityKit content on top). Constantly updating Twitch chat is a good worst case.
+
+### About `RAVESharedSpace`
+
+Moved from Nexus (`~/Projects/Nexus`, its spike `NexusKit`) on 2026-11-05, after the headset
+checks in `Nexus/docs/PLAN.md` passed. visionOS shows only the space-owning app's windows
+while an immersive space is open, and one app can't open another's scenes, so Longwave,
+Convolution and spatial-ai-character can share a room only as modules of one app. It is here
+rather than in Nexus because those apps have to conform to `RAVESpaceModule` and can't
+depend on Nexus; it is Engine-shaped (the space, its settings, ARKit).
+
+- **A module never opens or dismisses a space.** It asks the broker and releases; the space
+  is open while anyone holds a request. A bare `dismissImmersiveSpace()` in a module closes
+  everyone's.
+- **The policy's rules** (in `RAVESpacePolicy`'s header): immersion follows the newest
+  request, arms are hidden if anyone hides them, surroundings follow the newest module with
+  a preference, hands run if anyone needs them. Measured on the AVP.
+- **Everything a module adds stays under its root**: that is how a tap finds its module
+  (`RAVESpaceModuleComponent`) and how leaving takes it all away. Gestures in the space are
+  the host's; a module gets `tapped(_:)`.
+- **Two ARKit sessions in one process both get hand anchors** (measured: the same rate), so
+  a ported app may keep its own session at first; moving it onto `RAVESpatialServices` is
+  cleanup.
+- **The system can close the space** (Digital Crown, another app's space): every member
+  hears `spaceTakenAway()` and its request is already gone.
+- Window ids carry the module's prefix (`orbit.main`), and RAVESDK's `RAVEWindowScope`
+  scopes RAVEUI's window helpers by it. Neither package imports the other.
 
 ## The isolation rule (both targets)
 
@@ -585,6 +612,7 @@ the link list.
 | `halflife-visionos/LambdaVision` | `RAVEInput`, `RAVEDiagnostics`, `RAVERig`, `RAVEHolo` (+ SDK's `RAVEConsole`) |
 | `Hypnos` (visionOS + iOS) | `RAVEDiagnostics` (+ SDK's `RAVENet`, `RAVEUI`, `RAVEConsole`, `RAVEMedia`, `RAVESlideshow`) |
 | `spatial-ai-character` | `RAVERig` through its own `CharacterKit` package (+ SDK's `RAVEConsole`); it dropped `RAVEDiagnostics` with the debug server |
+| `Nexus` (visionOS) | `RAVESharedSpace` (+ SDK's `RAVELauncher`) |
 
 `RAVERig`'s two consumers are the reference case for the split rule: `CharacterKit` binds it
 to a RealityKit `SkeletalPose`, LambdaVision to a GoldSrc bone palette, and the shared half
