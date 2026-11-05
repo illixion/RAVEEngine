@@ -16,11 +16,18 @@ public enum RAVESpaceImmersion: String, Sendable, Codable {
     case mixed, full
 }
 
-public enum RAVESpaceSurroundings: String, Sendable, Codable {
-    /// The room dimmed (`.systemDark`), Hypnos's Cinema.
-    case dark
-    /// The room half dimmed (`.dim(intensity: 0.5)`).
-    case dim
+/// What the room looks like around the space's content: SwiftUI's `SurroundingsEffect`,
+/// as plain values so the policy stays framework-free and testable.
+public enum RAVESpaceSurroundings: Sendable, Equatable, Codable {
+    /// The system's dark room (`.systemDark`), Hypnos's Cinema.
+    case systemDark
+    /// The passthrough dimmed by `intensity` 0…1 (`.dim(intensity:)`).
+    case dim(intensity: Double)
+    /// The three fixed darkenings (`.semiDark`, `.dark`, `.ultraDark`), spatial-ai-character's filters.
+    case semiDark, dark, ultraDark
+    /// The passthrough multiplied by a colour (`.colorMultiply`), spatial-ai-character's
+    /// tints; components may exceed 1 to brighten a channel.
+    case tint(red: Double, green: Double, blue: Double)
 }
 
 /// What a module asks of the shared space while it is in it.

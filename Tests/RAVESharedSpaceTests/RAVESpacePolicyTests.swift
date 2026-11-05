@@ -25,15 +25,15 @@ import Testing
 
     @Test func surroundingsFollowTheNewestWithAPreference() throws {
         let resolved = try #require(RAVESpacePolicy.resolve([
-            ("cinema", .init(surroundings: .dark)),
+            ("cinema", .init(surroundings: .systemDark)),
             ("character", .init()),
         ]))
-        #expect(resolved.surroundings == .dark)
+        #expect(resolved.surroundings == .systemDark)
         let dimmer = try #require(RAVESpacePolicy.resolve([
-            ("cinema", .init(surroundings: .dark)),
-            ("reader", .init(surroundings: .dim)),
+            ("cinema", .init(surroundings: .systemDark)),
+            ("reader", .init(surroundings: .dim(intensity: 0.5))),
         ]))
-        #expect(dimmer.surroundings == .dim)
+        #expect(dimmer.surroundings == .dim(intensity: 0.5))
     }
 
     @Test func handsRunIfAnyoneNeedsThem() throws {
@@ -53,6 +53,18 @@ import Testing
         broker.openSpace = { space.opens += 1; return true }
         broker.dismissSpace = { space.dismissals += 1 }
         return broker
+    }
+
+    @Test func updatingKeepsTheOrderSoImmersionStaysWithTheNewest() {
+        let broker = broker(FakeSpace())
+        broker.request("character", .init(immersion: .mixed))
+        broker.request("cinema", .init(immersion: .full))
+        broker.update("character", .init(immersion: .mixed, surroundings: .tint(red: 1, green: 0.2, blue: 0.2)))
+        #expect(broker.members == ["character", "cinema"])
+        #expect(broker.resolution?.immersion == .full)
+        #expect(broker.resolution?.surroundings == .tint(red: 1, green: 0.2, blue: 0.2))
+        broker.update("absent", .init(immersion: .full))
+        #expect(broker.members == ["character", "cinema"])
     }
 
     private func settle() async {

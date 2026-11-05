@@ -50,6 +50,15 @@ public final class RAVESpaceBroker {
         Task { await reconcile() }
     }
 
+    /// Change what a module already in the space asks of it, keeping its place in the order,
+    /// so a setting changed mid-session (a filter, arms) doesn't make it the newest and take
+    /// immersion from whoever joined after it. Does nothing for a module that isn't in.
+    public func update(_ id: String, _ requirements: RAVESpaceRequirements) {
+        guard let index = requests.firstIndex(where: { $0.id == id }),
+              requests[index].requirements != requirements else { return }
+        requests[index].requirements = requirements
+    }
+
     public func release(_ id: String) {
         guard contains(id) else { return }
         requests.removeAll { $0.id == id }
