@@ -60,6 +60,33 @@ import RAVEInput
     }
 }
 
+/// Gaze from any endpoint that serves RAVE's gaze channel: a streaming host
+/// that forwards the gaze it receives back to the headset, say. `connect`
+/// connects to `endpoint`; `attach` reads a session the app connected itself.
+@available(visionOS 26.4, *)
+@MainActor public final class RAVEFoveatedChannelFeed: RAVEFoveatedGazeFeed {
+
+    public let name = "channel"
+    public let endpoint: FoveatedStreamingSession.Endpoint
+    public let receiver = RAVEFoveatedGazeReceiver()
+    public var gaze: any RAVEGazeSource { receiver.source }
+
+    public init(endpoint: FoveatedStreamingSession.Endpoint = .systemDiscovered) {
+        self.endpoint = endpoint
+    }
+
+    public func connect(_ session: FoveatedStreamingSession, options: [String: String]) async throws {
+        attach(session, options: options)
+        try await session.connect(endpoint: endpoint)
+    }
+
+    public func attach(_ session: FoveatedStreamingSession, options: [String: String]) {
+        receiver.attach(session)
+    }
+
+    public func detach() { receiver.detach() }
+}
+
 /// The official feed: the app's session streams from the app's own
 /// `RAVEGazeOnlyStreamingProvider` extension, which sends the focus region back.
 @available(visionOS 27.0, *)

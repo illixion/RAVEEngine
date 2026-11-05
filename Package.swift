@@ -83,6 +83,10 @@ let package = Package(
         // RAVEInput's other consumers never link FoveatedStreaming. Everything
         // sits under `canImport(FoveatedStreaming)`, so it builds empty on
         // macOS and in the simulator. The wire format is RAVEInput's.
+        // FoveatedStreaming exists from visionOS 26.4: an app with a lower
+        // floor weak-links it itself (`OTHER_LDFLAGS[sdk=xros*] = -weak_framework
+        // FoveatedStreaming`, as Longwave does). SwiftPM can't say "device only",
+        // and the simulator has no such framework.
         .target(name: "RAVEFoveatedGaze", dependencies: ["RAVEInput", .product(name: "DebugLog", package: "DebugTrace")]),
     ]
 )
