@@ -21,6 +21,7 @@ let package = Package(
         .library(name: "RAVEHolo", targets: ["RAVEHolo"]),
         .library(name: "RAVEPanel", targets: ["RAVEPanel"]),
         .library(name: "RAVESharedSpace", targets: ["RAVESharedSpace"]),
+        .library(name: "RAVEFoveatedGaze", targets: ["RAVEFoveatedGaze"]),
     ],
     // The one external dependency: RAVEInput hands its diagnostics over as
     // log messages, so each value keeps its own privacy (a Quest's address and
@@ -75,5 +76,13 @@ let package = Package(
         // Logs through DebugLog like RAVEInput.
         .target(name: "RAVESharedSpace", dependencies: [.product(name: "DebugLog", package: "DebugTrace")]),
         .testTarget(name: "RAVESharedSpaceTests", dependencies: ["RAVESharedSpace"]),
+        // Gaze from Apple's FoveatedStreaming (visionOS 27): the host half
+        // (a message-channel receiver, the official provider feed, plug-in
+        // discovery) and the extension half (a gaze-only streaming provider
+        // an app's extension target subclasses in one line). Its own target so
+        // RAVEInput's other consumers never link FoveatedStreaming. Everything
+        // sits under `canImport(FoveatedStreaming)`, so it builds empty on
+        // macOS and in the simulator. The wire format is RAVEInput's.
+        .target(name: "RAVEFoveatedGaze", dependencies: ["RAVEInput", .product(name: "DebugLog", package: "DebugTrace")]),
     ]
 )

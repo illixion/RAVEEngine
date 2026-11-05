@@ -1,0 +1,104 @@
+/*
+ RAVE Engine — the host app's half of the official foveated gaze route.
+
+ `RAVEFoveatedGazeReceiver` reads `RAVEGazeWire` messages off a session's
+ gaze channel into a `RAVEPushGazeSource`. `RAVEFoveatedProviderFeed`
+ connects the session to the app's own gaze provider extension and attaches
+ a receiver: the whole official path in one object.
+ */
+
+#if os(visionOS) && canImport(FoveatedStreaming)
+
+import DebugLog
+import Foundation
+import FoveatedStreaming
+import RAVEInput
+
+/// Reads gaze off a session's message channel.
+@available(visionOS 26.4, *)
+@MainActor public final class RAVEFoveatedGazeReceiver {
+
+    public let source = RAVEPushGazeSource()
+    public let channelID: FoveatedStreamingSession.MessageChannel.ID
+    /// True while the gaze channel is open.
+    public private(set) var channelOpen = false
+
+    private var task: Task<Void, Never>?
+    private let log = DebugLogger(subsystem: "RAVEEngine", category: "FoveatedGaze")
+
+    public init(channelID: FoveatedStreamingSession.MessageChannel.ID = RAVEFoveatedGaze.channelID) {
+        self.channelID = channelID
+    }
+
+    /// Waits for the channel to be offered, opens it and reads until the
+    /// session drops it, then waits again. Replaces an earlier attach.
+    public func attach(_ session: FoveatedStreamingSession) {
+        task?.cancel()
+        source.reset()
+        let id = channelID
+        task = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                if session.availableMessageChannels.contains(id), let channel = session.messageChannel(for: id) {
+                    self?.channelOpen = true
+                    self?.log.info("Gaze channel open")
+                    for await data in channel.receivedMessageStream {
+                        if Task.isCancelled { break }
+                        self?.source.ingest(data)
+                    }
+                    self?.channelOpen = false
+                    self?.log.info("Gaze channel closed")
+                }
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+        }
+    }
+
+    public func detach() {
+        task?.cancel()
+        task = nil
+        channelOpen = false
+    }
+}
+
+/// The official feed: the app's session streams from the app's own
+/// `RAVEGazeOnlyStreamingProvider` extension, which sends the focus region back.
+@available(visionOS 27.0, *)
+@MainActor public final class RAVEFoveatedProviderFeed: RAVEFoveatedGazeFeed {
+
+    public let name = "provider"
+    /// The extension's bundle identifier.
+    public let providerBundleID: String
+    public let endpoint: FoveatedStreamingSession.Endpoint
+    public let receiver = RAVEFoveatedGazeReceiver()
+    public var gaze: any RAVEGazeSource { receiver.source }
+
+    /// `providerBundleID` defaults to the app's own identifier plus
+    /// `.GazeProvider`. The endpoint reaches the extension untouched; a
+    /// gaze-only provider ignores it.
+    public init(providerBundleID: String? = nil, endpoint: FoveatedStreamingSession.Endpoint = .systemDiscovered) {
+        self.providerBundleID = providerBundleID ?? ((Bundle.main.bundleIdentifier ?? "") + ".GazeProvider")
+        self.endpoint = endpoint
+    }
+
+    /// The installed provider, or nil (no extension, or no entitlement).
+    public func provider() async -> FoveatedStreamingSession.StreamingProvider? {
+        await FoveatedStreamingSession.queryStreamingProviders().first { $0.bundleIdentifier == providerBundleID }
+    }
+
+    /// Whether this app can take the official route at all.
+    public func isAvailable() async -> Bool { await provider() != nil }
+
+    public func connect(_ session: FoveatedStreamingSession, options: [String: String]) async throws {
+        guard let provider = await provider() else { throw RAVEFoveatedGazeError.providerMissing(providerBundleID) }
+        attach(session, options: options)
+        try await session.connect(endpoint: endpoint, streamingProvider: provider)
+    }
+
+    public func attach(_ session: FoveatedStreamingSession, options: [String: String]) {
+        receiver.attach(session)
+    }
+
+    public func detach() { receiver.detach() }
+}
+
+#endif

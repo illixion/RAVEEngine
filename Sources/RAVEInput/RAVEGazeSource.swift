@@ -9,7 +9,9 @@
  head pose and asks `RAVEGazeTarget`.
 
  `RAVEHTTPGazeSource` polls any endpoint that answers `{"latest": {...}}`
- with `seq`, `t`, `pivot` and `direction`.
+ with `seq`, `t`, `pivot` and `direction`. `RAVEPushGazeSource` takes samples
+ a transport hands it, in `RAVEGazeWire`'s bytes or as values; the
+ `RAVEFoveatedGaze` target feeds one from Apple's foveated streaming provider.
  */
 
 import Foundation
@@ -25,11 +27,16 @@ public struct RAVEGazeSample: Equatable, Sendable {
     public var pivot: SIMD2<Float>
     /// When this app received it.
     public var receivedAt: Date
+    /// Estimated distance to what the wearer focuses on, in metres, when the
+    /// provider knows it (Apple's focus region does).
+    public var distance: Float?
 
-    public init(sequence: Int, direction: SIMD3<Float>, pivot: SIMD2<Float> = SIMD2(0.5, 0.5), receivedAt: Date = Date()) {
+    public init(sequence: Int, direction: SIMD3<Float>, pivot: SIMD2<Float> = SIMD2(0.5, 0.5),
+                distance: Float? = nil, receivedAt: Date = Date()) {
         self.sequence = sequence
         self.direction = direction
         self.pivot = pivot
+        self.distance = distance
         self.receivedAt = receivedAt
     }
 }

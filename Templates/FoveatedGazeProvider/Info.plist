@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EXAppExtensionAttributes</key>
+	<dict>
+		<!-- UNVERIFIED (2026-11-05): Apple documents no identifier for the
+		     FoveatedStreamingExtension point and Xcode 27.2 ships no template.
+		     Take it from Xcode's template or the docs once either exists. -->
+		<key>EXExtensionPointIdentifier</key>
+		<string>com.apple.foveated-streaming-provider</string>
+	</dict>
+</dict>
+</plist>
