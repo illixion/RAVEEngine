@@ -108,6 +108,9 @@ import RAVEInput
     }
 
     /// The installed provider, or nil (no extension, or no entitlement).
+    /// Ask before connecting, never while a session connects: on the AVP
+    /// (visionOS 27.2, 2026-11-05) a query then failed in the discovery daemon
+    /// and the app died.
     public func provider() async -> FoveatedStreamingSession.StreamingProvider? {
         await FoveatedStreamingSession.queryStreamingProviders().first { $0.bundleIdentifier == providerBundleID }
     }
