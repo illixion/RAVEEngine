@@ -9,6 +9,13 @@ public struct HandDigits: Sendable, Equatable {
     /// The remaining digits' chains, root first, ordered from the one nearest
     /// the thumb outward (index, middle, ring, pinky on a human hand).
     public var fingers: [[Int]]
+
+    /// Digits named rather than found, for a source that knows its own hand
+    /// (a hand tracker's joints).
+    public init(thumb: [Int]?, fingers: [[Int]]) {
+        self.thumb = thumb
+        self.fingers = fingers
+    }
 }
 
 /// Which source digits to hand the biped matcher, so each target digit is
