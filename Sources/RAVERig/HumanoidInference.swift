@@ -44,6 +44,11 @@ public struct HumanoidAnalysis: Sendable, Codable, Equatable {
     public var landmarks: HumanoidLandmarks
     /// Joints to keep in the skeleton handed to `automatchBiped`.
     public var keep: Set<Int>
+    /// Kept joints that split one limb bone into segments (Rigify's `thigh` +
+    /// `thigh.001`). They stay in the skeleton but are left out of the limb
+    /// chains, and the matcher should see their children hang from their
+    /// parent instead: it fails outright on a limb of four long bones.
+    public var collapse: Set<Int> = []
     /// Maximal subtrees to drop, each with the reason it lost.
     public var pruned: [PrunedBranch]
     /// Human-readable trace of how each landmark was chosen.
@@ -152,10 +157,21 @@ public enum HumanoidInference {
         // --- Assemble the chains --------------------------------------------
         let spine = path(rig, from: hips, to: chest).dropFirst().dropLast().map { $0 }
         let reach = { (i: Int) in rig.subtreeReach(from: i) }
-        let leftArm = chain(rig, from: armPair.left, tipward: reach)
-        let rightArm = chain(rig, from: armPair.right, tipward: reach)
-        let leftLeg = chain(rig, from: legPair.left, tipward: reach)
-        let rightLeg = chain(rig, from: legPair.right, tipward: reach)
+        var collapse = Set<Int>()
+        func limb(_ root: Int, longBones: Int) -> [Int] {
+            let full = chain(rig, from: root, tipward: reach)
+            let segments = splitSegments(rig, in: full, longBones: longBones)
+            collapse.formUnion(segments)
+            return full.filter { !segments.contains($0) }
+        }
+        let leftArm = limb(armPair.left, longBones: 3)
+        let rightArm = limb(armPair.right, longBones: 3)
+        let leftLeg = limb(legPair.left, longBones: 2)
+        let rightLeg = limb(legPair.right, longBones: 2)
+        if !collapse.isEmpty {
+            notes.append("segments collapsed: "
+                + collapse.sorted().map { rig.joints[$0].name }.joined(separator: " "))
+        }
 
         let landmarks = HumanoidLandmarks(
             hips: hips, spine: spine, chest: chest,
@@ -171,7 +187,10 @@ public enum HumanoidInference {
         // tongue, ears, hair) are not kept — they are pure noise to a biped
         // matcher, and the manifest names the ones that matter (gaze, visemes)
         // separately against the unpruned skeleton.
-        var keep = Set(landmarks.all)
+        // The whole head chain, not just its ends: a two-joint neck (Mal0's
+        // spine.004 > spine.005) otherwise loses its middle joint, and the
+        // head with it, since a pruned joint takes its subtree.
+        var keep = Set(landmarks.all).union(collapse).union(headChain)
         keep.formUnion(rig.ancestors(of: hips))
         for tip in [landmarks.leftHand, landmarks.rightHand, landmarks.leftFoot, landmarks.rightFoot] {
             if let tip { keep.formUnion(rig.subtree(from: tip)) }
@@ -204,7 +223,8 @@ public enum HumanoidInference {
         }
         walk(root)
 
-        return HumanoidAnalysis(landmarks: landmarks, keep: keep, pruned: pruned, notes: notes)
+        return HumanoidAnalysis(landmarks: landmarks, keep: keep, collapse: collapse,
+                                pruned: pruned, notes: notes)
     }
 
     // MARK: - Limb pairing
@@ -321,8 +341,15 @@ public enum HumanoidInference {
         var out = [root]
         var cursor = root
         while true {
-            let kids = children[cursor]
-            if kids.isEmpty { break }
+            let all = children[cursor]
+            guard let next = all.max(by: { tipward($0) < tipward($1) }), tipward(next) > 0 else { break }
+            // Only children that travel count toward a fan. Mal0's shoulder
+            // carries two mane bones beside the arm, both reaching nothing,
+            // and counting them ended the arm at the shoulder. The bar is
+            // deliberately near zero: uneven toes (a little toe a quarter the
+            // length of the big one) are still a fan.
+            let longest = tipward(next)
+            let kids = all.filter { tipward($0) > longest * 0.01 }
             // A joint that fans into three or more children is a hand or a
             // foot; the limb ends there and the digits hang off it. Two
             // children count as a fan only if both travel comparably — Synth's
@@ -333,10 +360,83 @@ public enum HumanoidInference {
                 let reaches = kids.map(tipward).sorted(by: >)
                 if reaches[1] > reaches[0] * 0.6 { break }
             }
-            guard let next = kids.max(by: { tipward($0) < tipward($1) }) else { break }
-            if tipward(next) <= 0 { break }
             out.append(next)
             cursor = next
+        }
+        return out
+    }
+
+    /// Source joints to leave out so each source leg is no deeper than the
+    /// target's.
+    ///
+    /// `automatchBiped` aligns a limb from its tip. Mixamo's leg ends in a
+    /// weightless `Toe_End` marker below `ToeBase`; Mal0's foot ends at its
+    /// toe. One joint more on the source shifted the whole leg: Mixamo's foot
+    /// drove Mal0's shin and the walk's stride came out at 15% of the source.
+    /// (The head had the same fault with `HeadTop_End`; pruning the source's
+    /// branches fixed that one.) Only weightless tips are ever dropped, so a
+    /// source can lose end markers but never a bone that moves the mesh.
+    public static func legTipTrim(source: RigSkeleton, sourceAnalysis: HumanoidAnalysis,
+                                  target: RigSkeleton, targetAnalysis: HumanoidAnalysis) -> Set<Int> {
+        func depth(_ rig: RigSkeleton, _ i: Int, keep: Set<Int>, collapse: Set<Int>) -> Int {
+            let below = rig.childIndices[i].filter(keep.contains)
+                .map { depth(rig, $0, keep: keep, collapse: collapse) }.max() ?? 0
+            return (collapse.contains(i) ? 0 : 1) + below
+        }
+        var keep = sourceAnalysis.keep
+        var dropped = Set<Int>()
+        let pairs = [(sourceAnalysis.landmarks.leftLeg.first, targetAnalysis.landmarks.leftLeg.first),
+                     (sourceAnalysis.landmarks.rightLeg.first, targetAnalysis.landmarks.rightLeg.first)]
+        for case let (s?, t?) in pairs {
+            let wanted = depth(target, t, keep: targetAnalysis.keep, collapse: targetAnalysis.collapse)
+            while depth(source, s, keep: keep, collapse: sourceAnalysis.collapse) > wanted {
+                let leaves = source.subtree(from: s).filter { i in
+                    keep.contains(i) && !source.childIndices[i].contains(where: keep.contains)
+                }
+                let deepest = leaves.map { source.ancestors(of: $0).count }.max() ?? 0
+                let tips = leaves.filter { source.ancestors(of: $0).count == deepest }
+                guard !tips.isEmpty, tips.allSatisfy({ source.joints[$0].weightedVertices == 0 }) else { break }
+                keep.subtract(tips)
+                dropped.formUnion(tips)
+            }
+        }
+        return dropped
+    }
+
+    /// Joints along a limb chain that cut one bone into segments.
+    ///
+    /// An arm chain (clavicle to hand) has at most three long bones, a leg
+    /// chain (hip to foot) two: thigh and shin. Rigify splits each limb bone
+    /// into two (`upper_arm` + `upper_arm.001`), and `automatchBiped` fails
+    /// on that with "Rig generation failed due to internal error". Geometry
+    /// at one joint cannot tell a split from an elbow — Mixamo's T-posed
+    /// elbow is straight with equal halves too — so the count decides: while
+    /// the limb has more than `longBones` long bones, the straightest joint
+    /// that halves a bone is a segment. A digitigrade leg's third bone is
+    /// never a straight, equal continuation of the shin, so it survives.
+    static func splitSegments(_ rig: RigSkeleton, in chain: [Int], longBones: Int) -> Set<Int> {
+        guard chain.count >= 3 else { return [] }
+        let points = chain.map { rig.joints[$0].restHead }
+        let lengths = zip(points, points.dropFirst()).map { simd_length_f($1 - $0) }
+        guard let longestBone = lengths.max(), longestBone > 1e-5 else { return [] }
+        var long = lengths.filter { $0 >= longestBone * 0.5 }.count
+
+        // Interior joint n sits between bone n-1 (in) and bone n (out).
+        var candidates: [(index: Int, bend: Float)] = []
+        for n in 1..<(chain.count - 1) {
+            let a = points[n] - points[n - 1], b = points[n + 1] - points[n]
+            let la = lengths[n - 1], lb = lengths[n]
+            guard la > 1e-5, lb > 1e-5 else { continue }
+            guard abs(lb / la - 1) < 0.1 else { continue }
+            let cosine = max(-1, min(1, simd_dot_f(a, b) / (la * lb)))
+            let bend = acos(cosine) * 180 / .pi
+            guard bend < 5 else { continue }
+            candidates.append((chain[n], bend))
+        }
+        var out = Set<Int>()
+        for c in candidates.sorted(by: { $0.bend < $1.bend }) where long > longBones {
+            out.insert(c.index)
+            long -= 1
         }
         return out
     }

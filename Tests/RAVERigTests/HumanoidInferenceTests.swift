@@ -240,3 +240,103 @@ private struct RigBuilder {
     let report = BindPoseCheck.run(rig, landmarks: analysis.landmarks)
     #expect(report.findings.contains { $0.message.contains("centimetres") })
 }
+
+// MARK: - Rigify-style rigs (Mal0)
+
+/// A Rigify DEF skeleton in miniature: every limb bone split in two
+/// (`upperarm` + `upperarm001`, exactly colinear, equal halves), a two-joint
+/// neck, and two mane bones on each clavicle that reach nothing.
+private func rigifyLike() -> RigBuilder {
+    var b = RigBuilder()
+    b.add("pelvis", 0, 0.95)
+    b.add("spine1", parent: "pelvis", 0, 1.05)
+    b.add("spine2", parent: "spine1", 0, 1.18)
+    b.add("chest", parent: "spine2", 0, 1.30)
+    b.add("neck1", parent: "chest", 0, 1.50)
+    b.add("neck2", parent: "neck1", 0, 1.56)
+    b.add("head", parent: "neck2", 0, 1.62, tail: SIMD3(0, 1.80, 0), weight: 900)
+    for (side, sign) in [("L", Float(1)), ("R", Float(-1))] {
+        b.add("clavicle\(side)", parent: "chest", sign * 0.04, 1.44)
+        b.add("maneA\(side)", parent: "clavicle\(side)", sign * 0.10, 1.46)
+        b.add("maneB\(side)", parent: "clavicle\(side)", sign * 0.12, 1.47)
+        b.add("upperarm\(side)", parent: "clavicle\(side)", sign * 0.17, 1.44)
+        b.add("upperarm001\(side)", parent: "upperarm\(side)", sign * 0.295, 1.36)
+        b.add("forearm\(side)", parent: "upperarm001\(side)", sign * 0.42, 1.28)
+        b.add("forearm001\(side)", parent: "forearm\(side)", sign * 0.53, 1.205)
+        b.add("hand\(side)", parent: "forearm001\(side)", sign * 0.64, 1.13)
+        for (n, finger) in ["thumb", "index", "middle"].enumerated() {
+            b.add("\(finger)1\(side)", parent: "hand\(side)", sign * 0.68, 1.10 - Float(n) * 0.01, weight: 40)
+            b.add("\(finger)2\(side)", parent: "\(finger)1\(side)", sign * 0.74, 1.05 - Float(n) * 0.01, weight: 30)
+        }
+        b.add("thigh\(side)", parent: "pelvis", sign * 0.16, 0.86)
+        b.add("thigh001\(side)", parent: "thigh\(side)", sign * 0.16, 0.67, 0.015)
+        b.add("shin\(side)", parent: "thigh001\(side)", sign * 0.16, 0.48, 0.03)
+        b.add("shin001\(side)", parent: "shin\(side)", sign * 0.16, 0.29, 0.015)
+        b.add("foot\(side)", parent: "shin001\(side)", sign * 0.16, 0.10)
+        b.add("toebase\(side)", parent: "foot\(side)", sign * 0.16, 0.03)
+        for (n, toe) in ["big", "mid", "little"].enumerated() {
+            b.add("toe\(toe)1\(side)", parent: "toebase\(side)", sign * (0.12 + Float(n) * 0.04), 0.03, weight: 20)
+            b.add("toe\(toe)2\(side)", parent: "toe\(toe)1\(side)", sign * (0.12 + Float(n) * 0.04), 0.02, weight: 20)
+        }
+    }
+    return b
+}
+
+@Test func collapsesSplitLimbSegments() throws {
+    let rig = rigifyLike().build()
+    let analysis = try HumanoidInference.analyse(rig)
+    let lm = analysis.landmarks
+    func name(_ i: Int) -> String { rig.joints[i].name }
+
+    // The mane bones no longer end the arm at the clavicle.
+    #expect(lm.leftArm.map(name) == ["clavicleL", "upperarmL", "forearmL", "handL"])
+    #expect(lm.rightArm.map(name) == ["clavicleR", "upperarmR", "forearmR", "handR"])
+    #expect(lm.leftLeg.map(name) == ["thighL", "shinL", "footL", "toebaseL"])
+    #expect(Set(analysis.collapse.map(name)) == [
+        "upperarm001L", "forearm001L", "thigh001L", "shin001L",
+        "upperarm001R", "forearm001R", "thigh001R", "shin001R",
+    ])
+    // Segments stay in the skeleton, and so does the neck's middle joint.
+    #expect(analysis.collapse.isSubset(of: analysis.keep))
+    #expect(analysis.keep.contains { name($0) == "neck2" })
+}
+
+@Test func aStraightElbowOrKneeIsNotASegment() throws {
+    // The plain biped's knee is dead straight with equal halves, exactly like
+    // a split; with only two long bones in the leg it must stay.
+    let analysis = try HumanoidInference.analyse(RigBuilder.biped().build())
+    #expect(analysis.collapse.isEmpty)
+}
+
+@Test func trimsWeightlessSourceTipsToMatchTheTargetLeg() throws {
+    var source = RigBuilder.biped()
+    for side in ["L", "R"] {
+        for toe in ["big", "mid", "little"] {
+            source.add("toe\(toe)End\(side)", parent: "toe\(toe)2\(side)",
+                       side == "L" ? 0.2 : -0.2, 0.01, weight: 0)
+        }
+    }
+    let sourceRig = source.build()
+    let targetRig = rigifyLike().build()
+    let trim = HumanoidInference.legTipTrim(
+        source: sourceRig, sourceAnalysis: try HumanoidInference.analyse(sourceRig),
+        target: targetRig, targetAnalysis: try HumanoidInference.analyse(targetRig))
+    #expect(trim.count == 6)
+    #expect(trim.allSatisfy { sourceRig.joints[$0].name.contains("End") })
+}
+
+@Test func neverTrimsATipThatMovesTheMesh() throws {
+    var target = RigBuilder()
+    for joint in RigBuilder.biped().joints where !joint.name.hasPrefix("toe") || joint.name.hasPrefix("toebase") {
+        target.add(joint.name,
+                   parent: joint.parent.map { RigBuilder.biped().joints[$0].name },
+                   joint.restHead.x, joint.restHead.y, joint.restHead.z,
+                   tail: joint.restTail, weight: joint.weightedVertices)
+    }
+    let sourceRig = RigBuilder.biped().build()
+    let targetRig = target.build()
+    let trim = HumanoidInference.legTipTrim(
+        source: sourceRig, sourceAnalysis: try HumanoidInference.analyse(sourceRig),
+        target: targetRig, targetAnalysis: try HumanoidInference.analyse(targetRig))
+    #expect(trim.isEmpty)
+}
