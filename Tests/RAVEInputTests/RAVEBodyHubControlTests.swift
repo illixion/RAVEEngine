@@ -125,3 +125,54 @@ struct RAVEBodyHubControlTests {
         #expect(status.cameras.count == 1 && status.cameras[0].pose == nil)
     }
 }
+
+/// PoseHub's control fixtures (`Tools/PoseHub/tests/body_stream_*_fixture.hex`
+/// in miscale), copied verbatim: the hub's encoder and this decoder must agree.
+@Suite("Body hub control fixtures")
+struct RAVEBodyHubControlFixtureTests {
+    let subscribe = "50484253010101000766697874757265"
+    let command = "5048425301087b22636d64223a22636f6e666967757265222c2263616d65726173223a332c22686569676874223a312e382c226d6f7665645078223a31322e302c226964223a377d"
+    let preview = "504842530109010100000000004a93400000103f0400e60000003fcdcccc3d0bcccdcccc3e9a99993e0c339a99193f9a99993e1bff6666e63e3333733f"
+    let status = "5048425301077b227374617465223a2263616c6962726174696e67222c2270726f6d7074223a226d6f7665222c2274657874223a224b656570206d6f76696e673a2073717561742c2073746570207369646520746f207369646520616e64207761766520796f75722061726d73222c2270726f6772657373223a302e342c227363616c65223a6e756c6c2c2267656e65726174696f6e223a2239663063326137643131653034623561222c226578706563746564223a322c22686569676874223a312e37352c226d6f7665645078223a382e302c2268656c64223a66616c73652c227265737461727473223a312c227265636f7264696e67223a7b226e616d65223a22737175617473222c227365636f6e6473223a342e322c226672616d6573223a3235307d2c2261636b223a7b22636d64223a22636f6e666967757265222c226f6b223a66616c73652c226572726f72223a22686569676874206d75737420626520312e3220746f20322e33206d6574726573222c226964223a377d2c2263616d65726173223a5b7b22696e646578223a302c226c6162656c223a2263616d657261203120284261636b29222c22646576696365223a226950686f6e6531362c32222c226c697665223a747275652c22667073223a33302e302c226672616d696e67223a226f6b222c22706c61636564223a747275652c226d6f766564223a66616c73652c2270726f6772657373223a312e302c226d6f76656d656e74223a312e302c226572726f725078223a312e322c226c656e73223a227265706f72746564222c22706f7365223a7b22706f736974696f6e223a5b302e302c312e302c302e305d2c22666f7277617264223a5b302e302c302e302c2d312e305d2c227570223a5b302e302c312e302c302e305d7d2c22666f76223a7b2268223a34362e302c2276223a37342e367d2c22706f727472616974223a747275652c227365656e4a6f696e7473223a31392c22736565696e67223a747275657d2c7b22696e646578223a312c226c6162656c223a2263616d6572612032202846726f6e7420556c747261205769646529222c22646576696365223a2269506164222c226c697665223a747275652c22667073223a33302e302c226672616d696e67223a226e6f6e65222c22706c61636564223a66616c73652c226d6f766564223a66616c73652c2270726f6772657373223a302e302c226d6f76656d656e74223a302e302c226572726f725078223a6e756c6c2c226c656e73223a22736f6c766564222c22706f7365223a6e756c6c2c22666f76223a7b2268223a37302e302c2276223a34332e367d2c22706f727472616974223a66616c73652c227365656e4a6f696e7473223a302c22736565696e67223a66616c73657d5d7d"
+
+    @Test("Subscribe: the same bytes as the hub's, flag bit 0 set")
+    func subscribeBytes() {
+        #expect(RAVEBodyStreamProtocol.subscribe(name: "fixture", wantsPreview: true) == bytes(hex: subscribe))
+    }
+
+    @Test("Command: a configure decodes to the hub's JSON")
+    func commandBytes() throws {
+        let wire = bytes(hex: command)
+        #expect(Array(wire[0..<6]) == RAVEBodyStreamProtocol.magic + [1, 8])
+        let json = try #require(JSONSerialization.jsonObject(with: Data(wire[6...])) as? [String: Any])
+        #expect(json["cmd"] as? String == "configure" && json["cameras"] as? Int == 3 && json["height"] as? Double == 1.8)
+        // Ours carries the same fields (the hub's fixture adds an id Swift does not send).
+        let ours = try #require(RAVEBodyStreamProtocol.command(.configure(cameras: 3, height: 1.8, movedPx: 12)))
+        let mine = try #require(JSONSerialization.jsonObject(with: Data(ours[6...])) as? [String: Any])
+        #expect(mine["cmd"] as? String == "configure" && mine["cameras"] as? Int == 3 && mine["movedPx"] as? Double == 12)
+    }
+
+    @Test("Preview: the hub's datagram decodes")
+    func previewBytes() throws {
+        let preview = try #require(RAVEBodyStreamProtocol.decodePreview(bytes(hex: preview)))
+        #expect(preview.camera == 1 && preview.personSeen && preview.captureTime == 1234.5 && preview.aspect == 0.5625)
+        #expect(preview.joints.count == 4)
+        #expect(preview.joints[.nose]?.point == SIMD2(0.5, 0.1))
+        #expect(abs((preview.joints[.nose]?.confidence ?? 0) - 0.902) < 0.01)
+        #expect(preview.joints[.leftAnkle]?.confidence == 1)
+    }
+
+    @Test("Status: the hub's datagram decodes with every new field")
+    func statusBytes() throws {
+        let status = try #require(RAVEBodyStreamProtocol.decodeStatus(bytes(hex: status)))
+        #expect(status.state == "calibrating" && status.expected == 2 && status.height == 1.75 && status.movedPx == 8)
+        #expect(!status.held && status.restarts == 1)
+        #expect(status.recording == .init(name: "squats", seconds: 4.2, frames: 250))
+        #expect(status.ack?.ok == false && status.ack?.error == "height must be 1.2 to 2.3 metres")
+        #expect(status.cameras.count == 2)
+        let first = status.cameras[0]
+        #expect(first.pose == .init(position: [0, 1, 0], forward: [0, 0, -1], up: [0, 1, 0]))
+        #expect(first.horizontalFov == 46 && first.verticalFov == 74.6 && first.portrait && first.seenJoints == 19)
+        #expect(status.cameras[1].pose == nil && !status.cameras[1].portrait && status.cameras[1].seenJoints == 0)
+    }
+}
