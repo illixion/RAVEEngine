@@ -85,6 +85,12 @@ public struct RAVEBodyAlignment: Sendable {
         public func apply(_ point: SIMD3<Float>) -> SIMD3<Float> {
             RAVEBodyAlignment.rotateYaw(yaw, point) + translation
         }
+
+        /// A direction (a camera's forward) carried into the world: turned,
+        /// not moved.
+        public func rotate(_ direction: SIMD3<Float>) -> SIMD3<Float> {
+            RAVEBodyAlignment.rotateYaw(yaw, direction)
+        }
     }
 
     struct Sample: Sendable {

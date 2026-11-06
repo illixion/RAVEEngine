@@ -29,9 +29,64 @@ public struct RAVEBodyHubStatus: Sendable, Equatable, Decodable {
     /// The calibration generation (hex) the frames carry.
     public var generation: String?
     public var cameras: [Camera]
+    /// How many cameras the hub waits for, the height it scales by and the
+    /// disagreement (pixels) it calls a moved camera: what `configure` set.
+    public var expected: Int?
+    public var height: Double?
+    public var movedPx: Double?
+    /// The hub holds its calibration until `resume`.
+    public var held: Bool
+    /// How many times a camera's pose process died and was started again.
+    public var restarts: Int
+    /// The cameras-only take the hub is writing, if any.
+    public var recording: Recording?
+    /// What the hub made of the last command it was sent.
+    public var ack: Ack?
 
     public enum State: String, Sendable {
-        case waiting, calibrating, solving, failed, tracking
+        case waiting, calibrating, solving, failed, tracking, held
+    }
+
+    public struct Recording: Sendable, Equatable, Decodable {
+        public var name: String
+        public var seconds: Double
+        public var frames: Int
+    }
+
+    public struct Ack: Sendable, Equatable, Decodable {
+        public var cmd: String
+        public var ok: Bool
+        public var error: String?
+    }
+
+    /// A camera's place in the hub's space (metres, +Y up, the floor at 0).
+    public struct Pose: Sendable, Equatable, Decodable {
+        public var position: SIMD3<Float>
+        /// The way the lens looks.
+        public var forward: SIMD3<Float>
+        public var up: SIMD3<Float>
+
+        enum CodingKeys: String, CodingKey { case position, forward, up }
+
+        public init(position: SIMD3<Float>, forward: SIMD3<Float>, up: SIMD3<Float>) {
+            self.position = position
+            self.forward = forward
+            self.up = up
+        }
+
+        public init(from decoder: any Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            func vector(_ key: CodingKeys) throws -> SIMD3<Float> {
+                let v = try c.decode([Float].self, forKey: key)
+                guard v.count == 3, v.allSatisfy(\.isFinite) else {
+                    throw DecodingError.dataCorruptedError(forKey: key, in: c, debugDescription: "not a vector")
+                }
+                return SIMD3(v[0], v[1], v[2])
+            }
+            position = try vector(.position)
+            forward = try vector(.forward)
+            up = try vector(.up)
+        }
     }
 
     public var knownState: State? { State(rawValue: state) }
@@ -53,6 +108,14 @@ public struct RAVEBodyHubStatus: Sendable, Equatable, Decodable {
         public var progress: Double
         /// Median disagreement with the other cameras, pixels at 720p.
         public var errorPx: Double?
+        /// Its place in the hub's space, once placed.
+        public var pose: Pose?
+        /// The upright picture's field of view, degrees.
+        public var horizontalFov: Double?
+        public var verticalFov: Double?
+        public var portrait: Bool
+        /// How many joints it sees right now.
+        public var seenJoints: Int
 
         /// A short note for a list row: what is wrong with its view, else
         /// how far along it is.
@@ -70,8 +133,10 @@ public struct RAVEBodyHubStatus: Sendable, Equatable, Decodable {
         }
 
         enum CodingKeys: String, CodingKey {
-            case label, device, live, fps, framing, placed, moved, progress, errorPx
+            case label, device, live, fps, framing, placed, moved, progress, errorPx, pose, fov, portrait, seenJoints
         }
+
+        struct Fov: Decodable { var h: Double?; var v: Double? }
 
         public init(from decoder: any Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -84,11 +149,18 @@ public struct RAVEBodyHubStatus: Sendable, Equatable, Decodable {
             moved = try c.decodeIfPresent(Bool.self, forKey: .moved) ?? false
             progress = try c.decodeIfPresent(Double.self, forKey: .progress) ?? 0
             errorPx = try c.decodeIfPresent(Double.self, forKey: .errorPx)
+            pose = try? c.decodeIfPresent(Pose.self, forKey: .pose)
+            let fov = try? c.decodeIfPresent(Fov.self, forKey: .fov)
+            horizontalFov = fov?.h
+            verticalFov = fov?.v
+            portrait = try c.decodeIfPresent(Bool.self, forKey: .portrait) ?? false
+            seenJoints = try c.decodeIfPresent(Int.self, forKey: .seenJoints) ?? 0
         }
     }
 
     enum CodingKeys: String, CodingKey {
         case state, prompt, text, progress, scale, generation, cameras
+        case expected, height, movedPx, held, restarts, recording, ack
     }
 
     public init(from decoder: any Decoder) throws {
@@ -100,6 +172,13 @@ public struct RAVEBodyHubStatus: Sendable, Equatable, Decodable {
         scale = try c.decodeIfPresent(String.self, forKey: .scale)
         generation = try c.decodeIfPresent(String.self, forKey: .generation)
         cameras = try c.decodeIfPresent([Camera].self, forKey: .cameras) ?? []
+        expected = try c.decodeIfPresent(Int.self, forKey: .expected)
+        height = try c.decodeIfPresent(Double.self, forKey: .height)
+        movedPx = try c.decodeIfPresent(Double.self, forKey: .movedPx)
+        held = try c.decodeIfPresent(Bool.self, forKey: .held) ?? false
+        restarts = try c.decodeIfPresent(Int.self, forKey: .restarts) ?? 0
+        recording = try? c.decodeIfPresent(Recording.self, forKey: .recording)
+        ack = try? c.decodeIfPresent(Ack.self, forKey: .ack)
     }
 }
 

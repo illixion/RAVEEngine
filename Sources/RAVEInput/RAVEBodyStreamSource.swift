@@ -57,6 +57,8 @@ public final class RAVEBodyStreamSource: @unchecked Sendable {
         /// Anchors moving faster than this (m/s) give no pairs: 10 ms of clock
         /// error would be a centimetre.
         public var pairMaxSpeed: Float = 1.0
+        /// Ask the hub for each camera's view of the person (PREVIEW).
+        public var wantsPreview = false
 
         public init(hub: Hub = .discover, name: String = "RAVE") {
             self.hub = hub
@@ -99,6 +101,8 @@ public final class RAVEBodyStreamSource: @unchecked Sendable {
         /// The hub's setup state and prompt, while it keeps sending them
         /// (nil after 3 s of silence, or from a hub that predates them).
         public var setup: RAVEBodyHubStatus?
+        /// The fit from the hub's space into this app's world, once aligned.
+        public var alignmentTransform: RAVEBodyAlignment.Transform?
 
         public init() {}
     }
@@ -140,6 +144,7 @@ public final class RAVEBodyStreamSource: @unchecked Sendable {
     private var heardAt: Double = 0
     private var setup: RAVEBodyHubStatus?
     private var setupAt: Double = 0
+    private var previews: [Int: (preview: RAVEBodyPreview, at: Double)] = [:]
     private var arrivals: [Double] = []
     private var dropped: UInt32 = 0
     private var rejected: UInt32 = 0
@@ -230,6 +235,7 @@ public final class RAVEBodyStreamSource: @unchecked Sendable {
         candidates.removeAll()
         latest = nil
         setup = nil
+        previews = [:]
         heardAt = 0
         references.removeAll()
         alignment.reset()
@@ -322,6 +328,7 @@ public final class RAVEBodyStreamSource: @unchecked Sendable {
         status.alignmentSpread = alignment.spreadMeters
         status.alignmentResidualCm = alignment.residual * 100
         if now - setupAt <= 3 { status.setup = setup }
+        status.alignmentTransform = alignment.transform
         if let latest {
             status.hubLatencyMs = latest.latency * 1000
             status.frameAge = max(0, now - latestCapturedAt)
@@ -336,6 +343,28 @@ public final class RAVEBodyStreamSource: @unchecked Sendable {
             status.state = connection == nil ? .searching : .waiting
         }
         return status
+    }
+
+    /// Asks the hub to do something; its answer is the next status's `ack`.
+    /// False when there is no connection yet.
+    @discardableResult
+    public func send(_ command: RAVEBodyHubCommand) -> Bool {
+        lock.lock()
+        let connection = self.connection
+        lock.unlock()
+        guard let connection, connection.state == .ready, let bytes = RAVEBodyStreamProtocol.command(command) else {
+            return false
+        }
+        connection.send(content: Data(bytes), completion: .idempotent)
+        return true
+    }
+
+    /// Each camera's newest view of the person, those under `maxAge` seconds
+    /// old, by camera index.
+    public func previews(now: Double, maxAge: Double = 1) -> [Int: RAVEBodyPreview] {
+        lock.lock()
+        defer { lock.unlock() }
+        return previews.compactMapValues { now - $0.at <= maxAge ? $0.preview : nil }
     }
 
     // MARK: Network (queue)
@@ -472,7 +501,8 @@ public final class RAVEBodyStreamSource: @unchecked Sendable {
         pendingPing = sent
         lock.unlock()
         guard let connection, connection.state == .ready else { return }
-        connection.send(content: Data(RAVEBodyStreamProtocol.subscribe(name: configuration.name)),
+        connection.send(content: Data(RAVEBodyStreamProtocol.subscribe(name: configuration.name,
+                                                                       wantsPreview: configuration.wantsPreview)),
                         completion: .idempotent)
         connection.send(content: Data(RAVEBodyStreamProtocol.ping(sentAt: sent)), completion: .idempotent)
     }
@@ -492,6 +522,11 @@ public final class RAVEBodyStreamSource: @unchecked Sendable {
                     self.accept(pong, at: now)
                 } else if let status = RAVEBodyStreamProtocol.decodeStatus(bytes) {
                     self.accept(status, at: now)
+                } else if let preview = RAVEBodyStreamProtocol.decodePreview(bytes) {
+                    self.lock.lock()
+                    self.previews[preview.camera] = (preview, now)
+                    self.heardAt = now
+                    self.lock.unlock()
                 }
             }
             if error == nil, connection.state != .cancelled { self.receive(on: connection) }

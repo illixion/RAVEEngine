@@ -41,6 +41,8 @@ public enum RAVEBodyStreamProtocol {
         case pong = 5
         case reference = 6
         case status = 7
+        case command = 8
+        case preview = 9
     }
 
     static let headerSize = 6
