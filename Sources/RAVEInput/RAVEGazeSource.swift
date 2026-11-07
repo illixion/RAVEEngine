@@ -112,7 +112,9 @@ public final class RAVEHTTPGazeSource: RAVEGazeSource, @unchecked Sendable {
                 if let (data, _) = try? await URLSession.shared.data(for: request),
                    let self,
                    let parsed = Self.parse(data, localClockNow: self.usesLocalCaptureClock
-                                           ? ProcessInfo.processInfo.systemUptime : nil) {
+                                           ? ProcessInfo.processInfo.systemUptime : nil,
+                                           localContinuousNow: self.usesLocalCaptureClock
+                                           ? Self.continuousNow() : nil) {
                     self.store(parsed)
                 }
                 try? await Task.sleep(for: .seconds(interval))
@@ -139,12 +141,38 @@ public final class RAVEHTTPGazeSource: RAVEGazeSource, @unchecked Sendable {
     /// this clock after all, and the sample gets no capture time.
     public static let localCaptureWindow: ClosedRange<TimeInterval> = -0.005...1.0
 
+    /// This device's continuous clock (uptime including sleep), in seconds.
+    public static func continuousNow() -> TimeInterval? {
+        #if canImport(Darwin)
+        return TimeInterval(clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)) / 1_000_000_000
+        #else
+        return nil
+        #endif
+    }
+
+    /// `ns` as a time on the uptime clock, or nil when it fits neither local
+    /// clock. A stamp on the continuous clock (which also counts sleep) is
+    /// moved back by the sleep since boot, the two clocks' difference now.
+    public static func localCaptureTime(ns: UInt64, uptimeNow: TimeInterval,
+                                        continuousNow: TimeInterval?) -> TimeInterval? {
+        let seconds = TimeInterval(ns) / 1_000_000_000
+        if localCaptureWindow.contains(uptimeNow - seconds) { return seconds }
+        if let continuousNow, localCaptureWindow.contains(continuousNow - seconds) {
+            return seconds - (continuousNow - uptimeNow)
+        }
+        return nil
+    }
+
     /// Parses the endpoint's JSON. Nil when it has no usable reading.
-    /// - Parameter localClockNow: This device's uptime (`systemUptime`, the
-    ///   clock `CACurrentMediaTime` reads) when the endpoint is local; then a
-    ///   plausible `captureNs` becomes `localCaptureTime`. Nil for a remote one.
+    /// - Parameters:
+    ///   - localClockNow: This device's uptime (`systemUptime`, the clock
+    ///     `CACurrentMediaTime` reads) when the endpoint is local; then a
+    ///     plausible `captureNs` becomes `localCaptureTime`. Nil for a remote one.
+    ///   - localContinuousNow: The continuous clock at the same moment, so a
+    ///     stamp taken on that clock is recognised too.
     public static func parse(_ data: Data, receivedAt: Date = Date(),
-                             localClockNow: TimeInterval? = nil) -> RAVEGazeSample? {
+                             localClockNow: TimeInterval? = nil,
+                             localContinuousNow: TimeInterval? = nil) -> RAVEGazeSample? {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let latest = root["latest"] as? [String: Any],
               let seq = latest["seq"] as? Int,
@@ -152,8 +180,7 @@ public final class RAVEHTTPGazeSource: RAVEGazeSource, @unchecked Sendable {
         let p = (latest["pivot"] as? [Double]).flatMap { $0.count == 2 ? $0 : nil } ?? [0.5, 0.5]
         var capture: TimeInterval?
         if let now = localClockNow, let ns = (latest["captureNs"] as? NSNumber)?.uint64Value, ns > 0 {
-            let seconds = TimeInterval(ns) / 1_000_000_000
-            if localCaptureWindow.contains(now - seconds) { capture = seconds }
+            capture = localCaptureTime(ns: ns, uptimeNow: now, continuousNow: localContinuousNow)
         }
         return RAVEGazeSample(
             sequence: seq,

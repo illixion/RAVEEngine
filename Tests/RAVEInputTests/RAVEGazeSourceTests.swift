@@ -30,6 +30,19 @@ import simd
         #expect(try #require(RAVEHTTPGazeSource.parse(bare, localClockNow: 2)).localCaptureTime == nil)
     }
 
+    @Test func continuousClockStampIsMovedOntoUptime() throws {
+        // Slept 600 s since boot: continuous = uptime + 600. The stamp is 8 ms old on it.
+        let uptime = 1_000.0, continuous = 1_600.0
+        let ns = UInt64((continuous - 0.008) * 1e9)
+        let t = try #require(RAVEHTTPGazeSource.localCaptureTime(ns: ns, uptimeNow: uptime, continuousNow: continuous))
+        #expect(abs((uptime - t) - 0.008) < 1e-6)
+        // On neither clock: nothing.
+        #expect(RAVEHTTPGazeSource.localCaptureTime(ns: UInt64(300e9), uptimeNow: uptime, continuousNow: continuous) == nil)
+        // An uptime stamp still wins as is.
+        let direct = try #require(RAVEHTTPGazeSource.localCaptureTime(ns: UInt64(999.99e9), uptimeNow: uptime, continuousNow: continuous))
+        #expect(abs(direct - 999.99) < 1e-6)
+    }
+
     @Test func rejectsMissingReading() {
         #expect(RAVEHTTPGazeSource.parse(Data(#"{"frames":0,"latest":null}"#.utf8)) == nil)
         #expect(RAVEHTTPGazeSource.parse(Data("nope".utf8)) == nil)
