@@ -85,6 +85,15 @@ public final class RAVEHTTPGazeSource: RAVEGazeSource, @unchecked Sendable {
     private var sample: RAVEGazeSample?
     private var task: Task<Void, Never>?
     private var localClock = false
+    private var stampOffsets: (uptime: TimeInterval, continuous: TimeInterval?)?
+
+    /// Diagnostics for a local endpoint: how long before now (positive) or after
+    /// it (negative) the last `captureNs` lay on the uptime and continuous clocks,
+    /// whether or not it was believed. Nil until a stamped reading arrives.
+    public var lastStampOffsets: (uptime: TimeInterval, continuous: TimeInterval?)? {
+        lock.lock(); defer { lock.unlock() }
+        return stampOffsets
+    }
 
     public var latest: RAVEGazeSample? {
         lock.lock(); defer { lock.unlock() }
@@ -111,6 +120,7 @@ public final class RAVEHTTPGazeSource: RAVEGazeSource, @unchecked Sendable {
             while !Task.isCancelled {
                 if let (data, _) = try? await URLSession.shared.data(for: request),
                    let self,
+                   self.noteStamp(data),
                    let parsed = Self.parse(data, localClockNow: self.usesLocalCaptureClock
                                            ? ProcessInfo.processInfo.systemUptime : nil,
                                            localContinuousNow: self.usesLocalCaptureClock
@@ -126,6 +136,18 @@ public final class RAVEHTTPGazeSource: RAVEGazeSource, @unchecked Sendable {
         task?.cancel()
         task = nil
         lock.lock(); sample = nil; lock.unlock()
+    }
+
+    /// Records `lastStampOffsets`; always true, so it can sit in a condition list.
+    private func noteStamp(_ data: Data) -> Bool {
+        guard usesLocalCaptureClock,
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let latest = root["latest"] as? [String: Any],
+              let ns = (latest["captureNs"] as? NSNumber)?.uint64Value, ns > 0 else { return true }
+        let seconds = TimeInterval(ns) / 1_000_000_000
+        let offsets = (ProcessInfo.processInfo.systemUptime - seconds, Self.continuousNow().map { $0 - seconds })
+        lock.lock(); stampOffsets = offsets; lock.unlock()
+        return true
     }
 
     private func store(_ new: RAVEGazeSample) {
