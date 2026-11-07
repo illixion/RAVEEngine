@@ -35,19 +35,27 @@ import SwiftUI
     /// Focus regions sent to the host so far.
     public private(set) var forwarded = 0
 
+    private var observationID = UUID()
     private var lastTimestamp: TimeInterval = .nan
     private let log = DebugLogger(subsystem: "RAVEEngine", category: "GazeProvider")
 
     public required init() {}
 
     open func connect(context: Context) async throws {
+        gazeChannel?.close()
+        gazeChannel = nil
+        observationID = UUID()
+        lastTimestamp = .nan
+        forwarded = 0
         self.context = context
         context.updateAvailableMessageChannels([RAVEFoveatedGaze.channelID])
         log.info("Gaze provider connected")
-        observeFocus()
+        observeFocus(observationID)
     }
 
     open func disconnect() async throws {
+        observationID = UUID()
+        lastTimestamp = .nan
         gazeChannel?.close()
         gazeChannel = nil
         context = nil
@@ -57,20 +65,22 @@ import SwiftUI
     open func openMessageChannel(_ channel: MessageChannel) throws {
         guard channel.id == RAVEFoveatedGaze.channelID else { throw RAVEFoveatedGazeError.unknownChannel }
         gazeChannel = channel
+        lastTimestamp = .nan
         forward()
     }
 
     public var immersiveScene: some View { EmptyView() }
 
     /// Re-arms after every change, so each new focus region is sent once.
-    private func observeFocus() {
-        guard let context else { return }
+    private func observeFocus(_ id: UUID) {
+        guard id == observationID, let context else { return }
         withObservationTracking {
             _ = context.latestFocusRegion
         } onChange: { [weak self] in
             Task { @MainActor in
-                self?.forward()
-                self?.observeFocus()
+                guard let self, self.observationID == id else { return }
+                self.forward()
+                self.observeFocus(id)
             }
         }
     }

@@ -24,6 +24,7 @@ import RAVEInput
     public private(set) var channelOpen = false
 
     private var task: Task<Void, Never>?
+    private var generation = UUID()
     private let log = DebugLogger(subsystem: "RAVEEngine", category: "FoveatedGaze")
 
     public init(channelID: FoveatedStreamingSession.MessageChannel.ID = RAVEFoveatedGaze.channelID) {
@@ -32,19 +33,21 @@ import RAVEInput
 
     /// Waits for the channel to be offered, opens it and reads until the
     /// session drops it, then waits again. Replaces an earlier attach.
-    public func attach(_ session: FoveatedStreamingSession) {
-        task?.cancel()
-        source.reset()
+    public func attach(_ session: FoveatedStreamingSession, usesLocalProviderClock: Bool = false) {
+        detach()
+        let generation = self.generation
         let id = channelID
         task = Task { @MainActor [weak self] in
-            while !Task.isCancelled {
+            while !Task.isCancelled, self?.generation == generation {
                 if session.availableMessageChannels.contains(id), let channel = session.messageChannel(for: id) {
                     self?.channelOpen = true
                     self?.log.info("Gaze channel open")
                     for await data in channel.receivedMessageStream {
-                        if Task.isCancelled { break }
-                        self?.source.ingest(data)
+                        guard !Task.isCancelled, self?.generation == generation else { return }
+                        self?.source.ingest(data, usesLocalProviderClock: usesLocalProviderClock)
                     }
+                    guard !Task.isCancelled, self?.generation == generation else { return }
+                    self?.source.reset()
                     self?.channelOpen = false
                     self?.log.info("Gaze channel closed")
                 }
@@ -54,6 +57,8 @@ import RAVEInput
     }
 
     public func detach() {
+        generation = UUID()
+        source.reset()
         task?.cancel()
         task = nil
         channelOpen = false
@@ -77,7 +82,12 @@ import RAVEInput
 
     public func connect(_ session: FoveatedStreamingSession, options: [String: String]) async throws {
         attach(session, options: options)
-        try await session.connect(endpoint: endpoint)
+        do {
+            try await session.connect(endpoint: endpoint)
+        } catch {
+            detach()
+            throw error
+        }
     }
 
     public func attach(_ session: FoveatedStreamingSession, options: [String: String]) {
@@ -119,13 +129,19 @@ import RAVEInput
     public func isAvailable() async -> Bool { await provider() != nil }
 
     public func connect(_ session: FoveatedStreamingSession, options: [String: String]) async throws {
+        detach()
         guard let provider = await provider() else { throw RAVEFoveatedGazeError.providerMissing(providerBundleID) }
         attach(session, options: options)
-        try await session.connect(endpoint: endpoint, streamingProvider: provider)
+        do {
+            try await session.connect(endpoint: endpoint, streamingProvider: provider)
+        } catch {
+            detach()
+            throw error
+        }
     }
 
     public func attach(_ session: FoveatedStreamingSession, options: [String: String]) {
-        receiver.attach(session)
+        receiver.attach(session, usesLocalProviderClock: true)
     }
 
     public func detach() { receiver.detach() }

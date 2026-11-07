@@ -27,17 +27,22 @@ public struct RAVEGazeSample: Equatable, Sendable {
     public var pivot: SIMD2<Float>
     /// When this app received it.
     public var receivedAt: Date
+    /// Capture time in this device's CACurrentMediaTime clock, when established
+    /// by a local provider. Remote/unknown clock domains must leave this nil.
+    /// Receipt time must never be substituted for capture time.
+    public var localCaptureTime: TimeInterval?
     /// Estimated distance to what the wearer focuses on, in metres, when the
     /// provider knows it (Apple's focus region does).
     public var distance: Float?
 
     public init(sequence: Int, direction: SIMD3<Float>, pivot: SIMD2<Float> = SIMD2(0.5, 0.5),
-                distance: Float? = nil, receivedAt: Date = Date()) {
+                distance: Float? = nil, receivedAt: Date = Date(), localCaptureTime: TimeInterval? = nil) {
         self.sequence = sequence
         self.direction = direction
         self.pivot = pivot
         self.distance = distance
         self.receivedAt = receivedAt
+        self.localCaptureTime = localCaptureTime
     }
 }
 

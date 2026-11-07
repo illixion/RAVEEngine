@@ -45,4 +45,35 @@ import simd
         #expect(src.received == 1)
         #expect(!src.ingest(Data([1, 2, 3])))
     }
+    @Test func captureClockMustBeEstablishedLocally() throws {
+        let source = RAVEPushGazeSource()
+        let sample = RAVEGazeSample(sequence: 5, direction: SIMD3(0, 0, -1))
+        let bytes = RAVEGazeWire.encode(sample, providerTime: 123.5)
+        #expect(source.ingest(bytes))
+        #expect(source.latest?.localCaptureTime == nil)
+        source.reset()
+        #expect(source.ingest(bytes, usesLocalProviderClock: true))
+        #expect(source.latest?.localCaptureTime == 123.5)
+    }
+
+    @Test func resetClearsCaptureTimeAndAcceptsRestartedSequence() {
+        let source = RAVEPushGazeSource()
+        let sample = RAVEGazeSample(sequence: 1, direction: SIMD3(0, 0, -1))
+        #expect(source.ingest(RAVEGazeWire.encode(sample, providerTime: 10), usesLocalProviderClock: true))
+        // A repeated sequence cannot refresh either capture or receipt time.
+        #expect(source.ingest(RAVEGazeWire.encode(sample, providerTime: 20), usesLocalProviderClock: true))
+        #expect(source.latest?.localCaptureTime == 10)
+        source.reset()
+        #expect(source.latest == nil)
+        #expect(source.ingest(RAVEGazeWire.encode(sample, providerTime: 30), usesLocalProviderClock: true))
+        #expect(source.latest?.localCaptureTime == 30)
+    }
+
+    @Test func rejectsInvalidProviderTimestamps() {
+        let sample = RAVEGazeSample(sequence: 1, direction: SIMD3(0, 0, -1))
+        for time in [Double.nan, .infinity, -1] {
+            #expect(RAVEGazeWire.decode(RAVEGazeWire.encode(sample, providerTime: time)) == nil)
+        }
+    }
+
 }

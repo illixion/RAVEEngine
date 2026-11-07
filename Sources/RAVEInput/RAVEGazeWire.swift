@@ -57,6 +57,7 @@ public enum RAVEGazeWire {
         guard b.count >= byteCount, b[0] == magic[0], b[1] == magic[1], b[2] == version else { return nil }
         let seq = read(UInt64.self, b, 4)
         let time = Double(bitPattern: read(UInt64.self, b, 12))
+        guard time.isFinite, time >= 0 else { return nil }
         func f(_ at: Int) -> Float { Float(bitPattern: read(UInt32.self, b, at)) }
         let direction = SIMD3(f(20), f(24), f(28))
         guard direction.x.isFinite, direction.y.isFinite, direction.z.isFinite else { return nil }
@@ -109,11 +110,15 @@ public final class RAVEPushGazeSource: RAVEGazeSource, @unchecked Sendable {
         count += 1
     }
 
-    /// Decodes and stores one `RAVEGazeWire` message. False when it wasn't one.
+    /// Decodes and stores one message. Set `usesLocalProviderClock` only for a
+    /// provider running on this device with CACurrentMediaTime capture stamps.
+    /// A remote provider's clock must not be used as local capture time.
     @discardableResult
-    public func ingest(_ data: Data, receivedAt: Date = Date()) -> Bool {
+    public func ingest(_ data: Data, receivedAt: Date = Date(), usesLocalProviderClock: Bool = false) -> Bool {
         guard let message = RAVEGazeWire.decode(data, receivedAt: receivedAt) else { return false }
-        push(message.sample)
+        var sample = message.sample
+        if usesLocalProviderClock { sample.localCaptureTime = message.providerTime }
+        push(sample)
         return true
     }
 
