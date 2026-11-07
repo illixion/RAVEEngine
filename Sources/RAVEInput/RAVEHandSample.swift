@@ -170,3 +170,43 @@ public extension RAVEHandSample {
     /// `fingertipSpreadToThumb` over palm length.
     var fingertipSpreadRatio: Float { normalised(fingertipSpreadToThumb) }
 }
+
+// MARK: - Grip closure
+
+/// How closed the hand is around something, for grabbing a held object or a
+/// body part rather than pinching it (Half-Life: Alyx style). Scale-free: it
+/// reads bend angles, not distances.
+public extension RAVEHandSample {
+    /// The bend read as fully closed: the knuckle-to-tip line about 110°
+    /// from the metacarpal, where fingers wrapped round a 6 cm bar point.
+    static let fullGripBend: Float = 110 * .pi / 180
+
+    /// One finger, 0 straight to 1 wrapped: the angle between its metacarpal
+    /// (metacarpal joint to knuckle) and the line from the knuckle to its tip,
+    /// over `fullGripBend`. The knuckle and metacarpal stay visible when a
+    /// closing hand hides its fingertips, so the reading holds up while
+    /// gripping. Coincident joints read 0.
+    func gripClosure(_ finger: RAVEHandFinger) -> Float {
+        let joints = self[finger]
+        let palm = joints.knuckle - joints.metacarpal, reach = joints.tip - joints.knuckle
+        let lengths = simd_length(palm) * simd_length(reach)
+        guard lengths > 1e-8 else { return 0 }
+        let bend = acos(min(1, max(-1, simd_dot(palm, reach) / lengths)))
+        return min(1, bend / Self.fullGripBend)
+    }
+
+    /// The four fingers' mean `gripClosure`: about 0 for an open hand, 0.35
+    /// relaxed, 0.65 a loose hold (holding hands), 0.9 and up a firm grip or
+    /// a fist.
+    var gripClosure: Float {
+        RAVEHandFinger.allCases.reduce(0) { $0 + gripClosure($1) } / Float(RAVEHandFinger.allCases.count)
+    }
+}
+
+public extension RAVEGestureGateTuning {
+    /// A whole-hand grip over `RAVEHandSample.gripClosure`. It engages at a
+    /// deliberate close and stays held down to a relaxed hand, releasing only
+    /// once the hand opens past that for 0.1 s: Valve found in its Alyx
+    /// playtests that players relax their hands while holding things.
+    static let grip = RAVEGestureGateTuning(sense: .rising, enter: 0.6, exit: 0.3, releaseGrace: 0.1)
+}
