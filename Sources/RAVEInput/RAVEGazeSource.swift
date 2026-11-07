@@ -9,7 +9,8 @@
  head pose and asks `RAVEGazeTarget`.
 
  `RAVEHTTPGazeSource` polls any endpoint that answers `{"latest": {...}}`
- with `seq`, `t`, `pivot` and `direction`. `RAVEPushGazeSource` takes samples
+ with `seq`, `t`, `pivot` and `direction`, plus `captureNs` when the endpoint
+ runs on this device and knows when the reading was captured. `RAVEPushGazeSource` takes samples
  a transport hands it, in `RAVEGazeWire`'s bytes or as values; the
  `RAVEFoveatedGaze` target feeds one from Apple's foveated streaming provider.
  */
@@ -83,10 +84,19 @@ public final class RAVEHTTPGazeSource: RAVEGazeSource, @unchecked Sendable {
     private let lock = NSLock()
     private var sample: RAVEGazeSample?
     private var task: Task<Void, Never>?
+    private var localClock = false
 
     public var latest: RAVEGazeSample? {
         lock.lock(); defer { lock.unlock() }
         return sample
+    }
+
+    /// Whether the endpoint runs on this device, so its `captureNs` (if any) is
+    /// this device's uptime clock and becomes `localCaptureTime`. Off by default:
+    /// a remote endpoint's clock says nothing about ours. Set before `start`.
+    public var usesLocalCaptureClock: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return localClock }
+        set { lock.lock(); localClock = newValue; sample = nil; lock.unlock() }
     }
 
     public init() {}
@@ -100,8 +110,10 @@ public final class RAVEHTTPGazeSource: RAVEGazeSource, @unchecked Sendable {
             request.timeoutInterval = 1
             while !Task.isCancelled {
                 if let (data, _) = try? await URLSession.shared.data(for: request),
-                   let parsed = Self.parse(data) {
-                    self?.store(parsed)
+                   let self,
+                   let parsed = Self.parse(data, localClockNow: self.usesLocalCaptureClock
+                                           ? ProcessInfo.processInfo.systemUptime : nil) {
+                    self.store(parsed)
                 }
                 try? await Task.sleep(for: .seconds(interval))
             }
@@ -111,6 +123,7 @@ public final class RAVEHTTPGazeSource: RAVEGazeSource, @unchecked Sendable {
     public func stop() {
         task?.cancel()
         task = nil
+        lock.lock(); sample = nil; lock.unlock()
     }
 
     private func store(_ new: RAVEGazeSample) {
@@ -121,17 +134,32 @@ public final class RAVEHTTPGazeSource: RAVEGazeSource, @unchecked Sendable {
         sample = new
     }
 
+    /// How far a local `captureNs` may lie before `localClockNow` and still be
+    /// believed. Anything older, or later than now, means the endpoint is not on
+    /// this clock after all, and the sample gets no capture time.
+    public static let localCaptureWindow: ClosedRange<TimeInterval> = -0.005...1.0
+
     /// Parses the endpoint's JSON. Nil when it has no usable reading.
-    public static func parse(_ data: Data, receivedAt: Date = Date()) -> RAVEGazeSample? {
+    /// - Parameter localClockNow: This device's uptime (`systemUptime`, the
+    ///   clock `CACurrentMediaTime` reads) when the endpoint is local; then a
+    ///   plausible `captureNs` becomes `localCaptureTime`. Nil for a remote one.
+    public static func parse(_ data: Data, receivedAt: Date = Date(),
+                             localClockNow: TimeInterval? = nil) -> RAVEGazeSample? {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let latest = root["latest"] as? [String: Any],
               let seq = latest["seq"] as? Int,
               let d = latest["direction"] as? [Double], d.count == 3 else { return nil }
         let p = (latest["pivot"] as? [Double]).flatMap { $0.count == 2 ? $0 : nil } ?? [0.5, 0.5]
+        var capture: TimeInterval?
+        if let now = localClockNow, let ns = (latest["captureNs"] as? NSNumber)?.uint64Value, ns > 0 {
+            let seconds = TimeInterval(ns) / 1_000_000_000
+            if localCaptureWindow.contains(now - seconds) { capture = seconds }
+        }
         return RAVEGazeSample(
             sequence: seq,
             direction: SIMD3(Float(d[0]), Float(d[1]), Float(d[2])),
             pivot: SIMD2(Float(p[0]), Float(p[1])),
-            receivedAt: receivedAt)
+            receivedAt: receivedAt,
+            localCaptureTime: capture)
     }
 }
