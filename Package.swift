@@ -21,6 +21,7 @@ let package = Package(
         .library(name: "RAVEHolo", targets: ["RAVEHolo"]),
         .library(name: "RAVEPanel", targets: ["RAVEPanel"]),
         .library(name: "RAVESharedSpace", targets: ["RAVESharedSpace"]),
+        .library(name: "RAVEModuleBus", targets: ["RAVEModuleBus"]),
         .library(name: "RAVEFoveatedGaze", targets: ["RAVEFoveatedGaze"]),
     ],
     // The one external dependency: RAVEInput hands its diagnostics over as
@@ -76,6 +77,14 @@ let package = Package(
         // Logs through DebugLog like RAVEInput.
         .target(name: "RAVESharedSpace", dependencies: [.product(name: "DebugLog", package: "DebugTrace")]),
         .testTarget(name: "RAVESharedSpaceTests", dependencies: ["RAVESharedSpace"]),
+        // The channel between modules in one process (Nexus): typed context feeds a
+        // module publishes (what is playing, what was said, where the screen is) and
+        // actions it offers (pause, skip), plus the shared media vocabulary, so a
+        // companion can watch along without importing the player. Foundation and
+        // simd only, host-tested; no dependency on RAVESharedSpace, so any module
+        // can link it whether or not it lives in a shared space.
+        .target(name: "RAVEModuleBus"),
+        .testTarget(name: "RAVEModuleBusTests", dependencies: ["RAVEModuleBus"]),
         // Gaze from Apple's FoveatedStreaming (visionOS 27): the host half
         // (a message-channel receiver, the official provider feed, plug-in
         // discovery) and the extension half (a gaze-only streaming provider

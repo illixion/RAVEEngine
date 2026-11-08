@@ -58,6 +58,7 @@ sits behind `RAVEHandInputProvider`, which returns `RAVENoHandInput` off-visionO
 | `RAVEHolo` | In-world holographic UI for Metal hosts: SDF glyph atlas (CoreText, no font shipped), panel/gauge/text scene, Metal 4 renderer drawing into a pass the host owns. Shader source compiles at runtime (SwiftPM's CLI builds no `.metal`); `RAVEHOLO_SNAPSHOT=/x.png swift test --filter RAVEHolo` renders a sample panel to look at. Renderer is `@available(macOS 26)` (Metal 4) without raising the package floor. Also interactive: pinchable targets (Compositor Services tracking areas + a CPU ray hit-test), widgets/stack layout, and a palm anchor (`RAVEHoloPalmAnchor`, an alias of RAVEInput's `RAVEPalmAnchor`, shared with `RAVEPanel`) — see "RAVEHolo: interactive panels". Depends on `RAVEInput` for the anchor only. Consumers: LambdaVision (HEV HUD + developer palm debug panel), Oneiros (Metal-host wrist HUD) |
 | `RAVEPanel` | Any SwiftUI view as a panel in a RealityKit scene: chrome, the attachment hosting fix, world / palm / head-follow placing, and a visibility verdict to pause content by. Rules host-tested, entity half visionOS-only. Depends on `RAVEInput` for the palm anchor. See "About `RAVEPanel`". Consumers: spatial-ai-character, Longwave |
 | `RAVESharedSpace` | Several apps in one immersive space as modules of one process: `RAVESpaceModule` (what an app implements: content under a root the host gives it), `RAVESpaceBroker` (open while anyone wants it), `RAVESpacePolicy` (the space's one immersion style, arm visibility and surroundings, from all members), `RAVESpatialServices` (one ARKit session), `RAVESpaceHost`/`RAVESpaceView` (per-module roots, taps routed to their module). Policy and broker host-tested. Consumers: Nexus, and spatial-ai-character as its module. See "About `RAVESharedSpace`" |
+| `RAVEModuleBus` | The channel between modules that share a process: typed context feeds a module publishes (`RAVEFeedKey`, rate-limited, rolling window, privacy label), actions it offers (`RAVEBusAction`, validated before they run), and the shared media vocabulary (`RAVEMediaFeeds`, `RAVEMediaControlling`, `RAVEMediaDigest`) so a companion can watch along without importing the player. Foundation + simd only, host-tested. Consumers: Nexus (planned: Hypnos as publisher, spatial-ai-character as reader). See "About `RAVEModuleBus`" |
 | `RAVEFoveatedGaze` | Where the wearer looks, through Apple's FoveatedStreaming (visionOS 27): `RAVEFoveatedGazeFeed` (one feed protocol), `RAVEFoveatedProviderFeed` + `RAVEFoveatedGazeReceiver` (host side of the official route), `RAVEGazeOnlyStreamingProvider` (a whole gaze-only provider extension, subclassed in one line; needs the `foveated-streaming-provider` entitlement), and `RAVEFoveatedGazeFeeds.plugin()` (a feed an app links in from outside its repo, found by the Objective-C name `RAVEFoveatedGazePlugin`). All under `os(visionOS) && canImport(FoveatedStreaming)`, so it builds empty on macOS, iOS and the simulator; its own target so other RAVEInput consumers never link FoveatedStreaming. Samples travel as `RAVEGazeWire` bytes (RAVEInput, host-tested). Extension target template: `Templates/FoveatedGazeProvider/`. Consumers: spatial-ai-character, Longwave |
 | `RAVEPCVR` | Planned — see "About the planned RAVEPCVR target" below before touching this |
 
@@ -189,6 +190,28 @@ depend on Nexus; it is Engine-shaped (the space, its settings, ARKit).
   setting change doesn't take immersion from whoever joined after it.
 - Window ids carry the module's prefix (`orbit.main`), and RAVESDK's `RAVEWindowScope`
   scopes RAVEUI's window helpers by it. Neither package imports the other.
+
+### About `RAVEModuleBus`
+
+Added 2026-11-08 for Nexus's "watching together" (`~/Projects/Nexus/docs/PLAN.md`, "The interop bus").
+Modules never import each other; they meet here. It does not depend on `RAVESharedSpace`, so a
+module can link it whether or not it lives in a shared space (a standalone app just has no reader).
+
+- **Feeds are typed keys a vocabulary declares** and both sides share (`RAVEMediaFeeds`). A feed with
+  no subscriber costs a store of at most `retainedLimit` samples; `retention` 0 keeps only the latest.
+- **`minInterval` drops chatty publishes** (unless `force`); a feed name that already carries another
+  type refuses the publish.
+- **`retire(module:)` on unmount** removes that module's samples and actions but leaves subscribers, so
+  readers hear it again when it returns. A host must call it from the module's `unmount`.
+- **Privacy is a label, not a gate**: `.personalText` / `.personalImage` tell the reader which consent
+  kind to put in front of an off-device backend. The bus never decides.
+- **Actions are checked before they run** (`RAVEBusAction.validate`: unknown or missing parameters,
+  wrong type, out-of-range number, a choice not in the list) and are listed only while `isAvailable`,
+  so a model is offered only the verbs that make sense this turn. `.outward` actions (they reach
+  beyond this headset) must go through the reader's consent gate.
+- **A player implements `RAVEMediaControlling` once**; `RAVEMediaActions.register` turns it into
+  `media.play/pause/skip/next`. `RAVEMediaDigest.text` is the few lines a model gets each turn.
+- Tests use a fake clock: `RAVEModuleBus(clock:)`. `RAVEModuleBus.shared` is the process-wide bus.
 
 ## The isolation rule (both targets)
 
