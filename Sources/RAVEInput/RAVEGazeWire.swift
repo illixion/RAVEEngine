@@ -10,7 +10,7 @@
 
      0  "RG"        magic
      2  u8          version (1)
-     3  u8          flags (bit 0: distance is set)
+     3  u8          flags (bit 0: distance is set; bits 1...2: RAVEGazeOrigin)
      4  u64         sequence
      12 f64         provider timestamp, seconds (CACurrentMediaTime on Apple)
      20 f32 x3      direction, head space (-z ahead, +x right, +y up)
@@ -41,7 +41,7 @@ public enum RAVEGazeWire {
         var out = Data(capacity: byteCount)
         out.append(contentsOf: magic)
         out.append(version)
-        out.append(sample.distance == nil ? 0 : 1)
+        out.append((sample.distance == nil ? 0 : 1) | sample.origin.rawValue << 1)
         append(UInt64(clamping: max(0, sample.sequence)), to: &out)
         append(providerTime.bitPattern, to: &out)
         for v in [sample.direction.x, sample.direction.y, sample.direction.z, sample.distance ?? 0,
@@ -66,7 +66,8 @@ public enum RAVEGazeWire {
             direction: direction,
             pivot: SIMD2(f(36), f(40)),
             distance: b[3] & 1 == 0 ? nil : f(32),
-            receivedAt: receivedAt)
+            receivedAt: receivedAt,
+            origin: b[3] & ~0x07 == 0 ? (RAVEGazeOrigin(rawValue: (b[3] >> 1) & 3) ?? .unknown) : .unknown)
         return Message(sample: sample, providerTime: time)
     }
 
@@ -88,7 +89,10 @@ public final class RAVEPushGazeSource: RAVEGazeSource, @unchecked Sendable {
     private var sample: RAVEGazeSample?
     private var count = 0
 
-    public init() {}
+    /// Set by the trusted adapter for a provider channel. This ceiling prevents
+    /// a malformed/relayed wire message from granting export permission.
+    private let restrictedToProvider: Bool
+    public init(restrictedToProvider: Bool = false) { self.restrictedToProvider = restrictedToProvider }
 
     public var latest: RAVEGazeSample? {
         lock.lock(); defer { lock.unlock() }
@@ -105,8 +109,14 @@ public final class RAVEPushGazeSource: RAVEGazeSource, @unchecked Sendable {
     /// provider ages out instead of looking fresh.
     public func push(_ new: RAVEGazeSample) {
         lock.lock(); defer { lock.unlock() }
-        if let old = sample, old.sequence == new.sequence { return }
-        sample = new
+        var stored = new
+        if restrictedToProvider {
+            stored = RAVEGazeSample(sequence: new.sequence, direction: new.direction, pivot: new.pivot,
+                                    distance: new.distance, receivedAt: new.receivedAt,
+                                    localCaptureTime: new.localCaptureTime, origin: .foveatedStreamingProvider)
+        }
+        if let old = sample, old.sequence == stored.sequence, old.origin == stored.origin { return }
+        sample = stored
         count += 1
     }
 

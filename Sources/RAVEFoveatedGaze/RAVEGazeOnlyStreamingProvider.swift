@@ -90,7 +90,8 @@ import SwiftUI
               let channel = gazeChannel, channel.channelStatus == .ready else { return }
         lastTimestamp = region.timestamp
         forwarded += 1
-        let sample = RAVEGazeSample(sequence: forwarded, direction: region.direction, distance: region.distance)
+        let sample = RAVEGazeSample(sequence: forwarded, direction: region.direction, distance: region.distance,
+                                    origin: .foveatedStreamingProvider)
         channel.send(RAVEGazeWire.encode(sample, providerTime: region.timestamp))
     }
 }

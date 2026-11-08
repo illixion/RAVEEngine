@@ -5,6 +5,44 @@ import simd
 
 @Suite struct RAVEGazeWireTests {
 
+    @Test func provenanceSurvivesWireAndOnlyExternalSensorsMayExport() throws {
+        for origin in [RAVEGazeOrigin.unknown, .foveatedStreamingProvider, .externalSensor] {
+            let sample = RAVEGazeSample(sequence: 1, direction: SIMD3(0, 0, -1), origin: origin)
+            let bytes = RAVEGazeWire.encode(sample, providerTime: 0)
+            let decoded = try #require(RAVEGazeWire.decode(bytes))
+            #expect(decoded.sample.origin == origin)
+            #expect(decoded.sample.origin.allowsApplicationExport == (origin == .externalSensor))
+        }
+    }
+
+    @Test func providerChannelCannotPromoteExportPermission() throws {
+        let source = RAVEPushGazeSource(restrictedToProvider: true)
+        let external = RAVEGazeSample(sequence: 1, direction: SIMD3(0, 0, -1), origin: .externalSensor)
+        #expect(source.ingest(RAVEGazeWire.encode(external, providerTime: 5), usesLocalProviderClock: true))
+        let stored = try #require(source.latest)
+        #expect(stored.origin == .foveatedStreamingProvider)
+        #expect(!stored.origin.allowsApplicationExport)
+        let relayed = try #require(RAVEGazeWire.decode(RAVEGazeWire.encode(stored, providerTime: 5)))
+        #expect(!relayed.sample.origin.allowsApplicationExport)
+    }
+
+    @Test func sourceSwitchRetractsExportEvenWhenSequenceRepeats() throws {
+        let source = RAVEPushGazeSource()
+        source.push(RAVEGazeSample(sequence: 1, direction: SIMD3(0, 0, -1), origin: .externalSensor))
+        #expect(source.latest?.origin.allowsApplicationExport == true)
+        source.push(RAVEGazeSample(sequence: 1, direction: SIMD3(0, 0, -1), origin: .foveatedStreamingProvider))
+        #expect(source.latest?.origin.allowsApplicationExport == false)
+    }
+
+    @Test func unknownWireFlagsNeverGrantExport() throws {
+        let sample = RAVEGazeSample(sequence: 1, direction: SIMD3(0, 0, -1), origin: .externalSensor)
+        var bytes = RAVEGazeWire.encode(sample, providerTime: 0)
+        bytes[3] = 0x84  // unknown flag + claimed external sensor
+        #expect(try #require(RAVEGazeWire.decode(bytes)).sample.origin == .unknown)
+        bytes[3] = 6     // unknown origin value
+        #expect(try #require(RAVEGazeWire.decode(bytes)).sample.origin == .unknown)
+    }
+
     @Test func roundTripsEveryField() throws {
         let s = RAVEGazeSample(sequence: 1234, direction: SIMD3(0.1, -0.2, -0.97),
                                pivot: SIMD2(0.4, 0.6), distance: 1.75)

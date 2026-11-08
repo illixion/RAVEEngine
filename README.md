@@ -278,3 +278,20 @@ at package resolution rather than at compile time.
 swift test                                                                 # pure-logic targets, on the host
 xcodebuild -scheme RAVEEngine-Package -sdk xros -destination 'generic/platform=visionOS' build
 ```
+
+
+### Gaze origin and application exports
+
+`RAVEGazeSample.origin` follows a reading through coordinate conversion and the
+`RAVEGazeWire` channel. Unknown/legacy readings and
+`.foveatedStreamingProvider` readings do not allow application exports; only an
+explicit `.externalSensor` adapter does. A network transport does not establish
+origin: `RAVEHTTPGazeSource` defaults to unknown and ignores provenance claims in
+JSON. Configure the origin at the trusted sensor adapter.
+
+The official provider receiver uses a restricted push source. It forces even a
+message claiming external origin to remain provider-originated. Relays retain
+that restriction. Use `origin.allowsApplicationExport` at OSC, runtime gaze and
+debug-export boundaries; rendering/foveation may consume restricted readings.
+An origin switch is accepted even when two sensors reuse a sequence number, so
+a stale external permission cannot survive a switch to a restricted source.

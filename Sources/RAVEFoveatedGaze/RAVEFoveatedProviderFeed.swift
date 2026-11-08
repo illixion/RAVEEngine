@@ -18,7 +18,7 @@ import RAVEInput
 @available(visionOS 26.4, *)
 @MainActor public final class RAVEFoveatedGazeReceiver {
 
-    public let source = RAVEPushGazeSource()
+    public let source = RAVEPushGazeSource(restrictedToProvider: true)
     public let channelID: FoveatedStreamingSession.MessageChannel.ID
     /// True while the gaze channel is open.
     public private(set) var channelOpen = false

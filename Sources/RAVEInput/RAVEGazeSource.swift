@@ -1,7 +1,8 @@
 /*
  RAVE Engine — where the wearer is looking, from any provider.
 
- The seam is deliberately blind to who produces the gaze. A provider yields
+ Consumers share geometry across sources, while export policy follows each
+ reading's origin. A provider yields
  `RAVEGazeSample`s: a unit direction in the wearer's *head space* (-z is
  straight ahead, +x right, +y up). Head space is the one frame every provider
  can agree on, so a consumer never has to reconcile a provider's world origin
@@ -18,8 +19,20 @@
 import Foundation
 import simd
 
+/// Where a reading originated, independent of its transport or presenter.
+/// Unknown/legacy readings are usable for foveation but never exported to apps.
+public enum RAVEGazeOrigin: UInt8, Equatable, Sendable {
+    case unknown = 0
+    case foveatedStreamingProvider = 1
+    case externalSensor = 2
+
+    public var allowsApplicationExport: Bool { self == .externalSensor }
+}
+
 /// One gaze reading.
 public struct RAVEGazeSample: Equatable, Sendable {
+    /// Preserved by relays; converting coordinates must not change this.
+    public let origin: RAVEGazeOrigin
     /// Monotonic counter from the provider; a repeat means no new reading.
     public var sequence: Int
     /// Unit vector in head space (-z ahead, +x right, +y up).
@@ -37,7 +50,9 @@ public struct RAVEGazeSample: Equatable, Sendable {
     public var distance: Float?
 
     public init(sequence: Int, direction: SIMD3<Float>, pivot: SIMD2<Float> = SIMD2(0.5, 0.5),
-                distance: Float? = nil, receivedAt: Date = Date(), localCaptureTime: TimeInterval? = nil) {
+                distance: Float? = nil, receivedAt: Date = Date(), localCaptureTime: TimeInterval? = nil,
+                origin: RAVEGazeOrigin = .unknown) {
+        self.origin = origin
         self.sequence = sequence
         self.direction = direction
         self.pivot = pivot
@@ -108,7 +123,8 @@ public final class RAVEHTTPGazeSource: RAVEGazeSource, @unchecked Sendable {
         set { lock.lock(); localClock = newValue; sample = nil; lock.unlock() }
     }
 
-    public init() {}
+    private let origin: RAVEGazeOrigin
+    public init(origin: RAVEGazeOrigin = .unknown) { self.origin = origin }
     deinit { task?.cancel() }
 
     /// Starts polling `url` every `interval` seconds; replaces a running poll.
@@ -124,7 +140,7 @@ public final class RAVEHTTPGazeSource: RAVEGazeSource, @unchecked Sendable {
                    let parsed = Self.parse(data, localClockNow: self.usesLocalCaptureClock
                                            ? ProcessInfo.processInfo.systemUptime : nil,
                                            localContinuousNow: self.usesLocalCaptureClock
-                                           ? Self.continuousNow() : nil) {
+                                           ? Self.continuousNow() : nil, origin: self.origin) {
                     self.store(parsed)
                 }
                 try? await Task.sleep(for: .seconds(interval))
@@ -194,7 +210,8 @@ public final class RAVEHTTPGazeSource: RAVEGazeSource, @unchecked Sendable {
     ///     stamp taken on that clock is recognised too.
     public static func parse(_ data: Data, receivedAt: Date = Date(),
                              localClockNow: TimeInterval? = nil,
-                             localContinuousNow: TimeInterval? = nil) -> RAVEGazeSample? {
+                             localContinuousNow: TimeInterval? = nil,
+                             origin: RAVEGazeOrigin = .unknown) -> RAVEGazeSample? {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let latest = root["latest"] as? [String: Any],
               let seq = latest["seq"] as? Int,
@@ -209,6 +226,6 @@ public final class RAVEHTTPGazeSource: RAVEGazeSource, @unchecked Sendable {
             direction: SIMD3(Float(d[0]), Float(d[1]), Float(d[2])),
             pivot: SIMD2(Float(p[0]), Float(p[1])),
             receivedAt: receivedAt,
-            localCaptureTime: capture)
+            localCaptureTime: capture, origin: origin)
     }
 }
