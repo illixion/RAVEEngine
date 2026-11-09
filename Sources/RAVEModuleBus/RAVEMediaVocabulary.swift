@@ -42,7 +42,7 @@ public struct RAVENowPlaying: Sendable, Equatable {
 }
 
 /// One line of dialogue or caption, in the item's own time.
-public struct RAVESubtitleCue: Sendable, Equatable {
+public struct RAVEMediaCue: Sendable, Equatable {
     public var text: String
     public var start: TimeInterval
     public var end: TimeInterval
@@ -85,7 +85,7 @@ public enum RAVEMediaFeeds {
     public static let nowPlaying = RAVEFeedKey<RAVENowPlaying>("media.nowPlaying", privacy: .personalText,
                                                                 minInterval: 1)
     /// Cues as they come due, kept three minutes.
-    public static let subtitle = RAVEFeedKey<RAVESubtitleCue>("media.subtitle", privacy: .personalText,
+    public static let subtitle = RAVEFeedKey<RAVEMediaCue>("media.subtitle", privacy: .personalText,
                                                                retention: 180, retainedLimit: 200)
     public static let screen = RAVEFeedKey<RAVESpaceObject>("media.screen", minInterval: 0.2)
 }

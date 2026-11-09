@@ -205,10 +205,10 @@ private let cues = RAVEFeedKey<String>("test.cues", retention: 10, retainedLimit
                     RAVENowPlaying(title: "Heat", overview: "A heist.", year: 1995, kind: .film,
                                    position: 2480, duration: 6720, isPlaying: true),
                     from: "hypnos")
-        bus.publish(RAVEMediaFeeds.subtitle, RAVESubtitleCue(text: "Old line", start: 0, end: 2), from: "hypnos")
+        bus.publish(RAVEMediaFeeds.subtitle, RAVEMediaCue(text: "Old line", start: 0, end: 2), from: "hypnos")
         clock.advance(200)   // beyond the 90 s window
-        bus.publish(RAVEMediaFeeds.subtitle, RAVESubtitleCue(text: "Don't get attached.", start: 1, end: 3, speaker: "Neil"), from: "hypnos")
-        bus.publish(RAVEMediaFeeds.subtitle, RAVESubtitleCue(text: "Don't get attached.", start: 1, end: 3, speaker: "Neil"), from: "hypnos")
+        bus.publish(RAVEMediaFeeds.subtitle, RAVEMediaCue(text: "Don't get attached.", start: 1, end: 3, speaker: "Neil"), from: "hypnos")
+        bus.publish(RAVEMediaFeeds.subtitle, RAVEMediaCue(text: "Don't get attached.", start: 1, end: 3, speaker: "Neil"), from: "hypnos")
         let text = RAVEMediaDigest.text(bus: bus)
         #expect(text?.contains("Watching: Heat (1995), 41:20 of 1:52:00, playing.") == true)
         #expect(text?.contains("About it: A heist.") == true)
