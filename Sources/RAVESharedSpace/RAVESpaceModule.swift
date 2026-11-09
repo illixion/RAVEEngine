@@ -26,6 +26,10 @@ public protocol RAVESpaceModule: AnyObject {
     var systemImage: String { get }
     /// The window the launcher opens.
     var mainWindowID: String { get }
+    /// Whether the module puts anything in the shared space. A module that is only windows (a
+    /// browser) returns false, and the launcher offers no "Join Space" for it: its windows already
+    /// stay beside every other module's content.
+    var contributesSpaceContent: Bool { get }
 
     /// The module joined the space: build its content under `root`, which the host has
     /// already put in the scene and owns. Everything the module adds must stay under it, so
@@ -55,6 +59,7 @@ public protocol RAVESpaceModule: AnyObject {
 }
 
 public extension RAVESpaceModule {
+    var contributesSpaceContent: Bool { true }
     func tapped(_ value: EntityTargetValue<SpatialTapGesture.Value>) {}
     func dragChanged(_ value: EntityTargetValue<DragGesture.Value>) {}
     func dragEnded(_ value: EntityTargetValue<DragGesture.Value>) {}
