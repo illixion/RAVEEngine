@@ -21,6 +21,11 @@
  - **Release grace** — once engaged, a lapse must last `releaseGrace` before it
    releases. A lapse that recovers inside it never happened. This is the
    "linger" of a palm-up panel, and it also absorbs tracking dropouts.
+ - **Charge grace** — while charging, a lapse shorter than `chargeGrace` does
+   not reset the charge, so a tracking dropout of a frame or two (or a finger
+   wobbling on a button's edge) does not restart a hold-to-confirm. The charge
+   engages only on a frame the signal is in. A disallowed frame
+   (`engageAllowed` false) still cancels at once: that is deliberate.
  - **Re-arm delay** — after a release, the gate will not start charging again
    for `rearmDelay`, so one long gesture cannot chain-fire.
  - **Conditions** — the caller evaluates its own predicates (hand in view, no
@@ -58,6 +63,8 @@ public struct RAVEGestureGateTuning: Sendable, Equatable {
     public var releaseGrace: TimeInterval
     /// How long after a release before charging may begin again.
     public var rearmDelay: TimeInterval
+    /// How long the signal may lapse mid-charge without resetting it.
+    public var chargeGrace: TimeInterval
 
     public init(
         sense: RAVEGateSense = .rising,
@@ -65,7 +72,8 @@ public struct RAVEGestureGateTuning: Sendable, Equatable {
         exit: Float,
         holdToEngage: TimeInterval = 0,
         releaseGrace: TimeInterval = 0,
-        rearmDelay: TimeInterval = 0
+        rearmDelay: TimeInterval = 0,
+        chargeGrace: TimeInterval = 0
     ) {
         self.sense = sense
         self.enter = enter
@@ -73,14 +81,19 @@ public struct RAVEGestureGateTuning: Sendable, Equatable {
         self.holdToEngage = holdToEngage
         self.releaseGrace = releaseGrace
         self.rearmDelay = rearmDelay
+        self.chargeGrace = chargeGrace
     }
 
     /// A boolean signal (fed through `update(active:now:)`) that must be held
     /// for `seconds` — Longwave's 1.5 s hold-to-open menu is `hold(1.5)`.
+    /// `chargeGrace` lets the held signal drop out briefly without
+    /// restarting the hold.
     public static func hold(_ seconds: TimeInterval,
-                            releaseGrace: TimeInterval = 0) -> RAVEGestureGateTuning {
+                            releaseGrace: TimeInterval = 0,
+                            chargeGrace: TimeInterval = 0) -> RAVEGestureGateTuning {
         RAVEGestureGateTuning(sense: .rising, enter: 0.5, exit: 0.5,
-                              holdToEngage: seconds, releaseGrace: releaseGrace)
+                              holdToEngage: seconds, releaseGrace: releaseGrace,
+                              chargeGrace: chargeGrace)
     }
 }
 
@@ -133,6 +146,8 @@ public struct RAVEGestureGate: Sendable, Equatable {
     private var chargeSince: TimeInterval = 0
     private var engagedSince: TimeInterval = 0
     private var lapsedSince: TimeInterval = 0
+    /// Set while a charge is lapsed inside its `chargeGrace`.
+    private var chargeLapsedSince: TimeInterval?
     private var releasedAt: TimeInterval = -.infinity
 
     public init(tuning: RAVEGestureGateTuning) {
@@ -144,6 +159,7 @@ public struct RAVEGestureGate: Sendable, Equatable {
     /// Drop to idle without reporting an edge, and without a re-arm delay.
     public mutating func reset() {
         phase = .idle
+        chargeLapsedSince = nil
         releasedAt = -.infinity
     }
 
@@ -196,7 +212,8 @@ public struct RAVEGestureGate: Sendable, Equatable {
                                   engageAllowed: Bool, holdAllowed: Bool) -> RAVEGestureGateOutput {
         var out = RAVEGestureGateOutput()
         let entering = (entered ?? false) && engageAllowed
-        let charging = (stillIn ?? false) && engageAllowed
+        let signalIn = stillIn ?? false
+        let charging = signalIn && engageAllowed
         let holding = (stillIn ?? false) && holdAllowed
 
         func engage() {
@@ -213,13 +230,24 @@ public struct RAVEGestureGate: Sendable, Equatable {
                 } else {
                     phase = .charging
                     chargeSince = now
+                    chargeLapsedSince = nil
                 }
             }
         case .charging:
-            if !charging {
+            if charging {
+                chargeLapsedSince = nil
+                if now - chargeSince >= tuning.holdToEngage { engage() }
+            } else if engageAllowed, !signalIn, tuning.chargeGrace > 0 {
+                // A lapse of the signal itself: keep the charge for the grace.
+                let since = chargeLapsedSince ?? now
+                chargeLapsedSince = since
+                if now - since >= tuning.chargeGrace {
+                    phase = .idle
+                    chargeLapsedSince = nil
+                }
+            } else {
                 phase = .idle
-            } else if now - chargeSince >= tuning.holdToEngage {
-                engage()
+                chargeLapsedSince = nil
             }
         case .engaged:
             if !holding {

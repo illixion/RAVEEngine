@@ -48,6 +48,37 @@ struct RAVEGestureGateTests {
         #expect(other.update(active: true, now: 2.7).engaged)
     }
 
+    @Test("Charge grace: a dropout of a frame or two keeps the charge, a real release ends it")
+    func chargeGrace() {
+        var gate = RAVEGestureGate(tuning: .hold(0.8, chargeGrace: 0.15))
+        gate.update(active: true, now: 0)
+        gate.update(active: true, now: 0.4)
+        // Two frames gone (a tracking dropout), back inside the grace.
+        #expect(gate.update(active: false, now: 0.41).phase == .charging)
+        #expect(gate.update(value: nil, now: 0.43).phase == .charging)
+        let back = gate.update(active: true, now: 0.45)
+        #expect(back.phase == .charging && abs(back.progress - 0.45 / 0.8) < 1e-5)
+        #expect(gate.update(active: true, now: 0.8).began)
+
+        // Let go for longer than the grace: the charge is gone.
+        var other = RAVEGestureGate(tuning: .hold(0.8, chargeGrace: 0.15))
+        other.update(active: true, now: 0)
+        other.update(active: false, now: 0.3)
+        #expect(other.update(active: false, now: 0.46).phase == .idle)
+        #expect(!other.update(active: true, now: 0.8).engaged)
+
+        // The hold time running out during a lapse waits for the signal.
+        var third = RAVEGestureGate(tuning: .hold(0.8, chargeGrace: 0.15))
+        third.update(active: true, now: 0)
+        #expect(!third.update(active: false, now: 0.82).engaged)
+        #expect(third.update(active: true, now: 0.85).began)
+
+        // A disallowed frame still cancels at once.
+        var fourth = RAVEGestureGate(tuning: .hold(0.8, chargeGrace: 0.15))
+        fourth.update(active: true, now: 0)
+        #expect(fourth.update(active: true, now: 0.1, engageAllowed: false).phase == .idle)
+    }
+
     @Test("Lambda's reload: thumb curl with hysteresis, 750 ms hold, cancelled by a trigger pull")
     func reloadHold() {
         let tuning = RAVEGestureGateTuning(sense: .falling, enter: 0.45, exit: 0.60, holdToEngage: 0.75)
