@@ -295,3 +295,11 @@ that restriction. Use `origin.allowsApplicationExport` at OSC, runtime gaze and
 debug-export boundaries; rendering/foveation may consume restricted readings.
 An origin switch is accepted even when two sensors reuse a sequence number, so
 a stale external permission cannot survive a switch to a restricted source.
+
+## Support
+
+I'm Ixion. I make RAVE Engine, and everything else I publish, as free and open-source software, and I don't expect anything in return. If it's useful to you and you'd like to help me keep building, you can [sponsor me on GitHub](https://github.com/sponsors/illixion). If not, I hope you enjoy it all the same. 💖
+
+<!-- Pose art slot: once https://illixion.com/images/support/synth-wave.png exists, uncomment:
+<p align="center"><img src="https://illixion.com/images/support/synth-wave.png" width="220" alt="Ixion's Synth character waving"></p>
+-->
