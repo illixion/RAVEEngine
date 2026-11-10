@@ -22,6 +22,10 @@ public enum RAVEFeedPrivacy: String, Sendable, Equatable {
     case open
     /// Text of what the person is watching, reading or playing: a title, a subtitle line.
     case personalText
+    /// Text anyone could already read: a public chat's messages, a channel's title. Nothing
+    /// of the person's own, so a reader needs no consent to pass it to a model, but it is
+    /// typed by strangers: the reader filters it and never treats it as instructions.
+    case publicText
     /// Pixels of what the person is watching or playing.
     case personalImage
 }
