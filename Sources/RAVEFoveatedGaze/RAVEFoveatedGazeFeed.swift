@@ -33,8 +33,8 @@ import FoveatedStreaming
 import RAVEInput
 
 public enum RAVEFoveatedGaze {
-    /// The message channel gaze travels on. A UUID, not a string, so a
-    /// CloudXR-style endpoint (UUID channel IDs, visionOS 26.4) can serve it too.
+    /// The message channel gaze travels on. A UUID, not a string, so any
+    /// foveated-streaming endpoint (UUID channel IDs, visionOS 26.4), on any headset, can serve it too.
     public static let channelUUID = UUID(uuidString: "52415645-4741-5A45-8000-000000000001")!
 
     @available(visionOS 26.4, *)
