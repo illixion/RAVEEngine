@@ -23,6 +23,7 @@ let package = Package(
         .library(name: "RAVESharedSpace", targets: ["RAVESharedSpace"]),
         .library(name: "RAVEModuleBus", targets: ["RAVEModuleBus"]),
         .library(name: "RAVEFoveatedGaze", targets: ["RAVEFoveatedGaze"]),
+        .library(name: "RAVEGuardian", targets: ["RAVEGuardian"]),
     ],
     // The one external dependency: RAVEInput hands its diagnostics over as
     // log messages, so each value keeps its own privacy (a Quest's address and
@@ -97,5 +98,15 @@ let package = Package(
         // FoveatedStreaming`, as Longwave does). SwiftPM can't say "device only",
         // and the simulator has no such framework.
         .target(name: "RAVEFoveatedGaze", dependencies: ["RAVEInput", .product(name: "DebugLog", package: "DebugTrace")]),
+        // A Guardian-style room boundary from visionOS's world mesh: the walls
+        // (and optionally furniture) light up as a tinted grid where the head,
+        // a hand or a controller is close to one or heading for one fast. The
+        // map, the alert rules, the chunk layout and the settings are
+        // Foundation + simd and host-tested; the RealityKit renderer, the
+        // MeshAnchor extraction and the optional ARKit sensor are visionOS-only.
+        // Takes probes as plain points, so it names no RAVEInput type.
+        // Consumers: Longwave (PCVR space), spatial-ai-character.
+        .target(name: "RAVEGuardian", dependencies: [.product(name: "DebugLog", package: "DebugTrace")]),
+        .testTarget(name: "RAVEGuardianTests", dependencies: ["RAVEGuardian"]),
     ]
 )
