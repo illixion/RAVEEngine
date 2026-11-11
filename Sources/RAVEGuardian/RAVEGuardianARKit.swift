@@ -183,8 +183,9 @@ public final class RAVEGuardianWorldSensor {
         self.log = log
     }
 
-    /// Start feeding `guardian`. Safe to call repeatedly.
-    public func start(feeding guardian: RAVEGuardian) {
+    /// Start feeding `guardian` (the RealityKit guardian, a Metal overlay, or
+    /// the bare world). Safe to call repeatedly.
+    public func start(feeding guardian: any RAVEGuardianMeshSink) {
         guard task == nil else { return }
         guard SceneReconstructionProvider.isSupported else {
             log?("guardian: scene reconstruction unsupported here — idle")

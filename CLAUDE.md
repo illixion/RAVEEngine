@@ -60,7 +60,7 @@ sits behind `RAVEHandInputProvider`, which returns `RAVENoHandInput` off-visionO
 | `RAVESharedSpace` | Several apps in one immersive space as modules of one process: `RAVESpaceModule` (what an app implements: content under a root the host gives it), `RAVESpaceBroker` (open while anyone wants it), `RAVESpacePolicy` (the space's one immersion style, arm visibility and surroundings, from all members), `RAVESpatialServices` (one ARKit session), `RAVESpaceHost`/`RAVESpaceView` (per-module roots, taps routed to their module). Policy and broker host-tested. Consumers: Nexus, and spatial-ai-character as its module. See "About `RAVESharedSpace`" |
 | `RAVEModuleBus` | The channel between modules that share a process: typed context feeds a module publishes (`RAVEFeedKey`, rate-limited, rolling window, privacy label), actions it offers (`RAVEBusAction`, validated before they run), and the shared media vocabulary (`RAVEMediaFeeds`, `RAVEMediaControlling`, `RAVEMediaDigest`) so a companion can watch along without importing the player, and the chat vocabulary (`RAVEChatFeeds`, `RAVEChatSending`, `RAVEChatDigest`) so it can read a live chat without knowing the site. Foundation + simd only, host-tested. Consumers: Nexus (planned: Hypnos as publisher, spatial-ai-character as reader). See "About `RAVEModuleBus`" |
 | `RAVEFoveatedGaze` | Where the wearer looks, through Apple's FoveatedStreaming (visionOS 27): `RAVEFoveatedGazeFeed` (one feed protocol), `RAVEFoveatedProviderFeed` + `RAVEFoveatedGazeReceiver` (host side of the official route), `RAVEGazeOnlyStreamingProvider` (a whole gaze-only provider extension, subclassed in one line; needs the `foveated-streaming-provider` entitlement), and `RAVEFoveatedGazeFeeds.plugin()` (a feed an app links in from outside its repo, found by the Objective-C name `RAVEFoveatedGazePlugin`). All under `os(visionOS) && canImport(FoveatedStreaming)`, so it builds empty on macOS, iOS and the simulator; its own target so other RAVEInput consumers never link FoveatedStreaming. Samples travel as `RAVEGazeWire` bytes (RAVEInput, host-tested). Extension target template: `Templates/FoveatedGazeProvider/`. Consumers: spatial-ai-character, Longwave |
-| `RAVEGuardian` | A Guardian-style room boundary from visionOS's world mesh: walls, doors and windows (furniture optional) drawn as a tinted world-aligned grid wherever the head, a hand or a controller is near one or heading for one fast. `RAVEGuardianMap` (barrier triangles in 1 m chunks per mesh anchor), `RAVEGuardianMonitor` (velocity, proximity + time-to-contact alert, per-chunk fade), `RAVEGuardianMeshLayout`/`RAVEGuardianPattern`, `RAVEGuardianSettings` + store (on by default) and `RAVEGuardianSettingsControls` are host-tested; `RAVEGuardian` (RealityKit root ticked by a System), `RAVEGuardianMeshExtraction`, `RAVEGuardianProbe.head/hand` and `RAVEGuardianWorldSensor` (its own scene reconstruction) are visionOS-only. See "About `RAVEGuardian`". Consumers: Longwave (PCVR space), spatial-ai-character |
+| `RAVEGuardian` | A Guardian-style room boundary from visionOS's world mesh: walls, doors and windows (furniture optional) drawn as a tinted world-aligned grid wherever the head, a hand or a controller is near one or heading for one fast. `RAVEGuardianMap` (barrier triangles in 1 m chunks per mesh anchor), `RAVEGuardianMonitor` (velocity, proximity + time-to-contact alert, per-chunk fade), `RAVEGuardianMeshLayout`/`RAVEGuardianPattern`, `RAVEGuardianSettings` + store (on by default), `RAVEGuardianSettingsControls` and `RAVEGuardianMetalRenderer` (the Metal drawing for Compositor Services hosts) are host-tested; `RAVEGuardian` (RealityKit root ticked by a System), `RAVEGuardianOverlay` (the same rules for Metal hosts), `RAVEGuardianMeshExtraction`, `RAVEGuardianProbe.head/hand` and `RAVEGuardianWorldSensor` (its own scene reconstruction) are visionOS-only. See "About `RAVEGuardian`". Consumers: Longwave (PCVR space), spatial-ai-character |
 | `RAVEPCVR` | Planned — see "About the planned RAVEPCVR target" below before touching this |
 
 **"XR/game-shaped" is the real scope, not the acronym.** Robot-Assisted Vision Enhancements
@@ -254,9 +254,15 @@ classified `MeshAnchor`s, not a drawn boundary.
   real mesh's wall coverage, the thresholds, hand/controller probes, the cost of a second
   reconstruction session in Longwave, and whether `readsDepth = false` really draws over the
   foveated stream.
-- Not done: Compositor Services hosts (Longwave's DEBUG Shell A, LambdaVision) would need a
-  Metal renderer over the same map and monitor; passthrough breakthrough when the head
-  crosses a wall is not attempted.
+- **Compositor Services hosts** (added the same day for Longwave's Shell A): `RAVEGuardianOverlay`
+  runs the map and monitor on the main actor at ~90 Hz (the probes live there) and publishes a
+  snapshot to `RAVEGuardianMetalRenderer`, which the host's render thread encodes per eye view after
+  its own drawing: lock-guarded, never awaits (the isolation rule). The pattern is computed in the
+  fragment shader from metres along the wall, so style, spacing and line width need no rebuild; no
+  depth test, premultiplied blend, load not clear, the view's rate map on the pass. Its host test
+  draws the demo room offscreen on the Mac. `RAVEGuardianWorld` is the mapped room both paths
+  share; the sensor feeds any `RAVEGuardianMeshSink`. LambdaVision/Oneiros could adopt it the same way.
+- Not done: passthrough breakthrough when the head crosses a wall.
 
 ## The isolation rule (both targets)
 

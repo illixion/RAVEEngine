@@ -232,3 +232,64 @@ private func room(anchor: UUID = UUID()) -> (RAVEGuardianMap, UUID) {
         #expect(b.settings.appearance.style == .lines)
     }
 }
+
+#if canImport(Metal)
+import Metal
+
+/// The Metal overlay's shader compiles and draws: a wall a metre ahead,
+/// seen straight on, shows lines and clear cells in the grid style and a
+/// fill everywhere in the solid one.
+@Suite struct RAVEGuardianMetalTests {
+    func render(style: RAVEGuardianSettings.Style) throws -> [UInt8]? {
+        guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue() else { return nil }
+        let size = 128
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: size, height: size,
+                                                                  mipmapped: false)
+        descriptor.usage = [.renderTarget, .shaderRead]
+        descriptor.storageMode = .shared
+        let texture = try #require(device.makeTexture(descriptor: descriptor))
+        var map = RAVEGuardianMap()
+        map.replace(anchor: UUID(), with: RAVEGuardianDemoRoom.walls(center: .zero, width: 2, depth: 2))
+        let renderer = RAVEGuardianMetalRenderer()
+        var appearance = RAVEGuardianSettings.Appearance()
+        appearance.style = style
+        renderer.publish(map: map, opacity: Dictionary(uniqueKeysWithValues: map.chunks.keys.map { ($0, Float(1)) }),
+                         appearance: appearance)
+        // Eye at (0.125, 1.125, 0) looking down -z: the wall at z = -1 fills a 60° view.
+        let f: Float = 1 / tan(Float.pi / 6), n: Float = 0.05, far: Float = 100
+        let projection = simd_float4x4(columns: (SIMD4(f, 0, 0, 0), SIMD4(0, f, 0, 0),
+                                                 SIMD4(0, 0, far / (n - far), -1), SIMD4(0, 0, far * n / (n - far), 0)))
+        var view = matrix_identity_float4x4
+        view.columns.3 = SIMD4(-0.125, -1.125, 0, 1)
+        let commandBuffer = try #require(queue.makeCommandBuffer())
+        let clear = MTLRenderPassDescriptor()
+        clear.colorAttachments[0].texture = texture
+        clear.colorAttachments[0].loadAction = .clear
+        clear.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        clear.colorAttachments[0].storeAction = .store
+        commandBuffer.makeRenderCommandEncoder(descriptor: clear)?.endEncoding()
+        renderer.encode(commandBuffer: commandBuffer, targets: [
+            .init(colorTexture: texture, viewport: MTLViewport(originX: 0, originY: 0, width: Double(size),
+                                                               height: Double(size), znear: 0, zfar: 1),
+                  viewProjection: projection * view)
+        ])
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        var bytes = [UInt8](repeating: 0, count: size * size * 4)
+        texture.getBytes(&bytes, bytesPerRow: size * 4, from: MTLRegionMake2D(0, 0, size, size), mipmapLevel: 0)
+        return stride(from: 3, to: bytes.count, by: 4).map { bytes[$0] }   // alpha
+    }
+
+    @Test func gridDrawsLinesWithClearCellsAndSolidFills() throws {
+        guard let grid = try render(style: .grid), let solid = try render(style: .solid) else { return }
+        let size = 128
+        // The middle of the frame: a cell centre at the eye's own x and height.
+        let centre = grid[(size / 2) * size + size / 2]
+        #expect(centre < 30)
+        #expect((grid.max() ?? 0) > 180)                 // lines drawn at full opacity
+        let lit = grid.filter { $0 > 128 }.count
+        #expect(lit > size * size / 50 && lit < size * size / 2)
+        #expect(solid.min()! > 100)                      // the wall fills the whole view
+    }
+}
+#endif

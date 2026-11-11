@@ -36,7 +36,7 @@ import RealityKit
 import UIKit
 
 @MainActor
-public final class RAVEGuardian {
+public final class RAVEGuardian: RAVEGuardianMeshSink {
 
     /// Add this to the immersive content. Its children are world-space chunk
     /// entities, so keep it at the identity transform under the scene root.
@@ -48,7 +48,9 @@ public final class RAVEGuardian {
 
     /// The last frame's verdict, for debug endpoints and HUDs.
     public private(set) var lastFrame = RAVEGuardianFrame()
-    public private(set) var map = RAVEGuardianMap()
+    /// The mapped room.
+    public let world = RAVEGuardianWorld()
+    public var map: RAVEGuardianMap { world.map }
 
     /// Draws nothing while false (the app's space is hidden, a menu is up);
     /// the settings switch is separate and persistent.
@@ -62,8 +64,6 @@ public final class RAVEGuardian {
     private var builtSpacing: Float?
     private var materialKey: MaterialKey?
     private var material: UnlitMaterial?
-    private var floors: [UUID: Float] = [:]
-    private var generations: [UUID: Int] = [:]
 
     private struct MaterialKey: Equatable {
         var style: RAVEGuardianSettings.Style
@@ -89,44 +89,21 @@ public final class RAVEGuardian {
     // MARK: Mesh
 
     /// The lowest floor seen so far, metres.
-    public var floorY: Float? { floors.values.min() }
+    public var floorY: Float? { world.floorY }
 
     /// Feed a mesh anchor from the app's own scene reconstruction.
-    public func ingest(_ anchor: MeshAnchor) {
-        let id = anchor.id
-        let generation = (generations[id] ?? 0) + 1
-        generations[id] = generation
-        let knownFloor = floorY
-        Task.detached(priority: .userInitiated) { [weak self] in
-            let result = RAVEGuardianMeshExtraction.barriers(of: anchor, floorY: knownFloor)
-            await self?.apply(result, anchor: id, generation: generation)
-        }
-    }
+    public func ingest(_ anchor: MeshAnchor) { world.ingest(anchor) }
 
-    public func remove(anchorID: UUID) {
-        generations[anchorID] = (generations[anchorID] ?? 0) + 1
-        floors[anchorID] = nil
-        map.remove(anchor: anchorID)
-    }
+    public func remove(anchorID: UUID) { world.remove(anchorID: anchorID) }
 
     /// Replace one anchor's barriers directly (tests, a saved room, a demo).
     public func setBarriers(_ triangles: [RAVEGuardianTriangle], anchor: UUID) {
-        generations[anchor] = (generations[anchor] ?? 0) + 1
-        map.replace(anchor: anchor, with: triangles)
+        world.setBarriers(triangles, anchor: anchor)
     }
 
     public func removeAll() {
-        generations.removeAll()
-        floors.removeAll()
-        map.removeAll()
+        world.removeAll()
         monitor.reset()
-    }
-
-    private func apply(_ result: (triangles: [RAVEGuardianTriangle], floorY: Float?),
-                       anchor: UUID, generation: Int) {
-        guard generations[anchor] == generation else { return }
-        if let y = result.floorY { floors[anchor] = y }
-        map.replace(anchor: anchor, with: result.triangles)
     }
 
     // MARK: Frame
