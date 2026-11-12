@@ -20,6 +20,7 @@ let package = Package(
         .library(name: "RAVERig", targets: ["RAVERig"]),
         .library(name: "RAVEHolo", targets: ["RAVEHolo"]),
         .library(name: "RAVEPanel", targets: ["RAVEPanel"]),
+        .library(name: "RAVESleeve", targets: ["RAVESleeve"]),
         .library(name: "RAVESharedSpace", targets: ["RAVESharedSpace"]),
         .library(name: "RAVEModuleBus", targets: ["RAVEModuleBus"]),
         .library(name: "RAVEFoveatedGaze", targets: ["RAVEFoveatedGaze"]),
@@ -68,6 +69,16 @@ let package = Package(
         // visionOS-only. Content-agnostic: never imports RAVESDK.
         .target(name: "RAVEPanel", dependencies: ["RAVEInput"]),
         .testTarget(name: "RAVEPanelTests", dependencies: ["RAVEPanel"]),
+        // A HUD worn on the forearm: the arm as a coordinate system (from the
+        // hand skeleton's two forearm joints), a follower that stays on the arm
+        // in motion, a declarative layout of pages and tiles (Codable, so a
+        // deck of keys is a JSON file), faces that show as the arm turns, gaze
+        // and direct-touch presses, a radial menu any input drives, and
+        // docked panels. Foundation + simd, host-tested; it draws nothing.
+        // RAVEPanel (RealityKit) and RAVEHolo (Metal) are its two renderers,
+        // so the rules exist once for both kinds of host.
+        .target(name: "RAVESleeve", dependencies: ["RAVEInput"]),
+        .testTarget(name: "RAVESleeveTests", dependencies: ["RAVESleeve", "RAVEModuleBus"]),
         // Several apps sharing one immersive space as modules of one process
         // (Nexus), since visionOS shows only the space-owning app's windows.
         // The broker opens the space while anyone wants it, the policy settles
