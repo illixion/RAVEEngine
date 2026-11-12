@@ -40,6 +40,14 @@ public extension RAVESleeveArm {
                   wrist: position(.forearmWrist), elbow: position(.forearmArm), palm: palm)
     }
 
+    /// The `forearmWrist` joint's transform in the world: the space a host
+    /// runs the sleeve in when its tiles hang off RealityKit's anchor for the
+    /// same joint (`RAVESleevePanels.anchor(to:)`).
+    nonisolated static func wristJointTransform(_ anchor: HandAnchor) -> simd_float4x4? {
+        guard anchor.isTracked, let joint = anchor.handSkeleton?.joint(.forearmWrist) else { return nil }
+        return anchor.originFromAnchorTransform * joint.anchorFromJointTransform
+    }
+
     /// The fingertip that presses a sleeve: the index tip of a tracked hand
     /// anchor (its estimated pose while the tip itself is hidden).
     nonisolated static func fingertip(_ anchor: HandAnchor) -> SIMD3<Float>? {

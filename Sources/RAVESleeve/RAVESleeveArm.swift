@@ -60,6 +60,30 @@ public struct RAVESleeveArm: Sendable, Equatable {
     }
 }
 
+public extension RAVESleeveArm {
+    /// The arm in another space: points through `matrix`, directions through
+    /// its rotation. A host that parents its tiles to the system's own wrist
+    /// anchor runs the sleeve in that joint's space (`matrix` is the joint's
+    /// inverse), so the system moves the tiles with the arm at render time
+    /// and only what changes relative to the wrist goes through the app.
+    func transformed(by matrix: simd_float4x4) -> RAVESleeveArm {
+        func point(_ p: SIMD3<Float>) -> SIMD3<Float> {
+            let q = matrix * SIMD4(p, 1)
+            return SIMD3(q.x, q.y, q.z)
+        }
+        func direction(_ d: SIMD3<Float>) -> SIMD3<Float> {
+            let q = matrix * SIMD4(d, 0)
+            let v = SIMD3(q.x, q.y, q.z)
+            return simd_length(v) > 1e-6 ? simd_normalize(v) : d
+        }
+        return RAVESleeveArm(side: side, wrist: point(wrist), elbow: elbow.map(point),
+                             palm: RAVEPalmPose(position: point(palm.position),
+                                                palmNormalOut: direction(palm.palmNormalOut),
+                                                fingersDirection: direction(palm.fingersDirection)),
+                             elbowBack: elbowBack.map(direction))
+    }
+}
+
 /// Which side of the forearm a tile is on.
 public enum RAVESleeveFace: String, Codable, Sendable, CaseIterable {
     /// The back of the forearm: where a watch face is.

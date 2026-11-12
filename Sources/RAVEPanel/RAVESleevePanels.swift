@@ -83,8 +83,47 @@ public final class RAVESleevePanels {
     /// Points per metre of an attachment at scale 1.
     public static let pointsPerMetre: Float = 1360
 
-    /// Add this to the scene at the origin: tiles are posed in world space.
+    /// Add this to the scene at the origin.
     public let root = Entity()
+
+    /// What the tiles hang off: `root` (snapshots in world space), or the
+    /// system's anchor for a forearm's wrist joint (snapshots in that
+    /// joint's space). See `anchor(to:)`.
+    private var container: Entity
+    private var anchors: [RAVESleeveSide: Entity] = [:]
+    public private(set) var anchoredSide: RAVESleeveSide?
+
+    /// Hang the tiles off RealityKit's own anchor for that arm's
+    /// `forearmWrist` joint, or (nil) off the world again.
+    ///
+    /// An app that poses tiles from ARKit each frame is always a few frames
+    /// behind the arm: worn on a Vision Pro (2026-11-12) the sleeve trailed
+    /// far enough for a rising arm to cover it. The system moves an anchored
+    /// entity itself, at render time, with a predicted pose. So the host
+    /// runs the sleeve in the wrist joint's space
+    /// (`RAVESleeveArm.transformed(by:)` with the inverse of
+    /// `wristJointTransform`) and the snapshots it applies are in that space
+    /// too; only what moves relative to the wrist is then the app's to follow.
+    /// The simulator has no hands, so a simulated arm stays in the world.
+    public func anchor(to side: RAVESleeveSide?) {
+        guard side != anchoredSide else { return }
+        anchoredSide = side
+        if let side {
+            let anchor = anchors[side] ?? {
+                let entity = AnchorEntity(.hand(side == .left ? .left : .right, location: .joint(for: .forearmWrist)),
+                                          trackingMode: .predicted)
+                entity.name = "RAVESleeveAnchor.\(side.rawValue)"
+                root.addChild(entity)
+                anchors[side] = entity
+                return entity
+            }()
+            container = anchor
+        } else {
+            container = root
+        }
+        for item in items.values { container.addChild(item.holder) }
+        if let radialHolder { container.addChild(radialHolder) }
+    }
 
     public var onPressBegan: ((String) -> Void)?
     public var onPressEnded: ((String) -> Void)?
@@ -109,6 +148,7 @@ public final class RAVESleevePanels {
     ///   - radial: draws an open radial menu; nil for `RAVESleeveRadialWheel`.
     public init(tile: ((RAVESleeveTileModel) -> AnyView)? = nil,
                 radial: ((RAVESleeveRadialModel) -> AnyView)? = nil) {
+        container = root
         root.name = "RAVESleeve"
         makeTile = tile ?? { AnyView(RAVESleeveTileView(model: $0)) }
         makeRadial = radial ?? { AnyView(RAVESleeveRadialWheel(model: $0)) }
@@ -126,7 +166,7 @@ public final class RAVESleevePanels {
             let item = items[id] ?? make(id, display)
             if item.model.display != display { item.model.display = display }
             item.holder.isEnabled = true
-            item.holder.setTransformMatrix(placed.transform, relativeTo: nil)
+            item.holder.setTransformMatrix(placed.transform, relativeTo: container)
             item.holder.components.set(OpacityComponent(opacity: placed.opacity))
             Self.fit(item.content, width: placed.size.x)
         }
@@ -140,7 +180,7 @@ public final class RAVESleevePanels {
             if radialModel.geometry != view.geometry { radialModel.geometry = view.geometry }
             if radialModel.armedLabel != view.armedLabel { radialModel.armedLabel = view.armedLabel }
             holder.isEnabled = true
-            holder.setTransformMatrix(view.transform, relativeTo: nil)
+            holder.setTransformMatrix(view.transform, relativeTo: container)
             if let content = holder.children.first { Self.fit(content, width: view.geometry.memberOuter * 2) }
         } else if radialHolder?.isEnabled == true {
             radialHolder?.isEnabled = false
@@ -171,7 +211,7 @@ public final class RAVESleevePanels {
         let content = Entity()
         content.components.set(ViewAttachmentComponent(rootView: makeTile(model)))
         holder.addChild(content)
-        root.addChild(holder)
+        container.addChild(holder)
         let item = Item(holder: holder, content: content, model: model)
         items[id] = item
         return item
@@ -183,7 +223,7 @@ public final class RAVESleevePanels {
         let content = Entity()
         content.components.set(ViewAttachmentComponent(rootView: makeRadial(radialModel)))
         holder.addChild(content)
-        root.addChild(holder)
+        container.addChild(holder)
         radialHolder = holder
         return holder
     }
@@ -214,9 +254,23 @@ public final class RAVESleeveHost {
 
     /// One frame. `arm` is the arm the sleeve is on, `fingertip` the other
     /// hand's index tip, `head` the eye point. Returns what the wearer did.
+    ///
+    /// With `anchored`, all three are in the worn arm's wrist-joint space and
+    /// the tiles hang off the system's anchor for it (`RAVESleevePanels
+    /// .anchor(to:)`); without, they are in the world. The snapshot is in
+    /// whichever space the inputs were.
     @discardableResult
     public func update(arm: RAVESleeveArm?, head: SIMD3<Float>, fingertip: SIMD3<Float>?,
-                       now: TimeInterval = CACurrentMediaTime(), showAllowed: Bool = true) -> [RAVESleeveEvent] {
+                       now: TimeInterval = CACurrentMediaTime(), showAllowed: Bool = true,
+                       anchored: Bool = false) -> [RAVESleeveEvent] {
+        if let arm {
+            let side: RAVESleeveSide? = anchored ? arm.side : nil
+            if side != panels.anchoredSide {
+                // A different space: the filters start afresh in it.
+                sleeve.follower.reset()
+                panels.anchor(to: side)
+            }
+        }
         let frame = sleeve.update(arm: arm, head: head, now: now, showAllowed: showAllowed)
         sleeve.touch(fingertip: fingertip, now: now)
         panels.apply(frame)
