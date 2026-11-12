@@ -1,7 +1,7 @@
 #if os(visionOS)
 import Observation
 import QuartzCore
-import RAVESleeve
+@_exported import RAVESleeve
 import RealityKit
 import SwiftUI
 
@@ -145,6 +145,13 @@ public final class RAVESleevePanels {
         } else if radialHolder?.isEnabled == true {
             radialHolder?.isEnabled = false
         }
+    }
+
+    /// How many of the shown tiles SwiftUI has laid out (an attachment has
+    /// no extent until it is in a window). For diagnostics.
+    public var laidOutTileCount: Int {
+        items.values.filter { $0.holder.isEnabled
+            && ($0.content.components[ViewAttachmentComponent.self]?.bounds.extents.x ?? 0) > 0 }.count
     }
 
     /// Scales an attachment so its laid-out width is `width` metres.
