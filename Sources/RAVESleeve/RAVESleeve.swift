@@ -237,7 +237,8 @@ public struct RAVESleeve: Sendable {
             let pages = layout.pages(face)
             if !pages.contains(where: { $0.id == page[face] }) { page[face] = pages.first?.id }
         }
-        openDocks.removeAll { layout.dock($0) == nil }
+        let docks = Set(layout.docks.map(\.id))
+        openDocks.removeAll { !docks.contains($0) }
         if let radialID, layout.radial(radialID) == nil { radial = nil; self.radialID = nil }
     }
 
