@@ -67,7 +67,9 @@ let package = Package(
         // not build for the visionOS simulator. The
         // rules are framework-free and host-tested; the entity half is
         // visionOS-only. Content-agnostic: never imports RAVESDK.
-        .target(name: "RAVEPanel", dependencies: ["RAVEInput"]),
+        // It also draws a sleeve (RAVESleeve) as flat SwiftUI tiles, hence that
+        // dependency.
+        .target(name: "RAVEPanel", dependencies: ["RAVEInput", "RAVESleeve"]),
         .testTarget(name: "RAVEPanelTests", dependencies: ["RAVEPanel"]),
         // A HUD worn on the forearm: the arm as a coordinate system (from the
         // hand skeleton's two forearm joints), a follower that stays on the arm
