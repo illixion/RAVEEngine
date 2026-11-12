@@ -221,8 +221,12 @@ defaults in `RAVESleeve.Tuning` and `RAVESleeveMetrics` are still estimates):
   follower's cut-off, and off the anchor once well steadied. That is `RAVESleeveSteadier`; the
   owner called the result good on the headset with its defaults.
 - **Tiles are plain fills, not materials**, and unchanged tiles are not re-sent to the renderer.
-- Open: a line of blocks eating the tiles when the headset is hot, and the tiles fading where
-  visionOS judges the arm to be in front. `upperLimbVisibility(.hidden)` did not stop either.
+- **The space hides the upper limbs' mask while the sleeve shows**
+  (`upperLimbVisibility(.hidden)`, or `hidesUpperLimbs` in a shared space). visionOS draws real
+  arms over content it judges to be behind them, and tiles a centimetre off the forearm faded
+  in patches inside that mask's error; with the mask hidden they do not (owner, on the headset).
+  Hypnos's HUD does the same for its picture. The cost: virtual content draws over the hands.
+- Open: a line of blocks eating the tiles when the headset is hot.
   Gaze and pinch presses register reliably; finger presses register but were few in the
   one session counted, so direct touch still wants a proper trial.
 
