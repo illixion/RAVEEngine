@@ -121,7 +121,13 @@ public final class RAVESleevePanels {
         } else {
             container = root
         }
-        for item in items.values { container.addChild(item.holder) }
+        for id in Array(items.keys) {
+            guard var item = items[id] else { continue }
+            container.addChild(item.holder)
+            item.transform = nil
+            item.settling = 90
+            items[id] = item
+        }
         if let radialHolder { container.addChild(radialHolder) }
     }
 
@@ -135,6 +141,14 @@ public final class RAVESleevePanels {
         let holder: Entity
         let content: Entity
         let model: RAVESleeveTileModel
+        /// What the holder was last given, so an unchanged tile is not sent
+        /// to the renderer again every frame.
+        var transform: simd_float4x4?
+        var opacity: Float = -1
+        /// Frames left in which the transform is set regardless: an
+        /// attachment is put in a window only by a transform change made
+        /// after it is in the scene (see `RAVEPanel.tick`).
+        var settling = 90
     }
 
     private var items: [String: Item] = [:]
@@ -163,12 +177,33 @@ public final class RAVESleevePanels {
             let id = placed.tile.id
             live.insert(id)
             let display = RAVESleeveTileDisplay(placed)
-            let item = items[id] ?? make(id, display)
+            var item = items[id] ?? make(id, display)
             if item.model.display != display { item.model.display = display }
-            item.holder.isEnabled = true
-            item.holder.setTransformMatrix(placed.transform, relativeTo: container)
-            item.holder.components.set(OpacityComponent(opacity: placed.opacity))
+            if !item.holder.isEnabled {
+                item.holder.isEnabled = true
+                item.settling = 90
+            }
+            // Anchored to the wrist a tile's transform barely changes, and
+            // re-sending five attachments' transforms and opacities every
+            // frame is work for a renderer that is already short of time.
+            if item.settling > 0 || item.transform.map({ !Self.close($0, placed.transform) }) ?? true {
+                item.holder.setTransformMatrix(placed.transform, relativeTo: container)
+                item.transform = placed.transform
+                item.settling = max(0, item.settling - 1)
+            }
+            if abs(item.opacity - placed.opacity) > 0.004 {
+                // Fully shown, a tile carries no opacity component: one at 1
+                // still has the renderer composite the tile through an
+                // offscreen pass every frame.
+                if placed.opacity >= 0.999 {
+                    item.holder.components.remove(OpacityComponent.self)
+                } else {
+                    item.holder.components.set(OpacityComponent(opacity: placed.opacity))
+                }
+                item.opacity = placed.opacity
+            }
             Self.fit(item.content, width: placed.size.x)
+            items[id] = item
         }
         for (id, item) in items where !live.contains(id) && item.holder.isEnabled {
             item.holder.isEnabled = false
@@ -185,6 +220,14 @@ public final class RAVESleevePanels {
         } else if radialHolder?.isEnabled == true {
             radialHolder?.isEnabled = false
         }
+    }
+
+    /// Whether two transforms differ by less than a renderer could show:
+    /// a twentieth of a millimetre, a hundredth of a degree or so.
+    private static func close(_ a: simd_float4x4, _ b: simd_float4x4) -> Bool {
+        simd_distance(a.columns.3, b.columns.3) < 0.00005
+            && simd_distance(a.columns.0, b.columns.0) < 0.0003
+            && simd_distance(a.columns.1, b.columns.1) < 0.0003
     }
 
     /// How many of the shown tiles SwiftUI has laid out (an attachment has
@@ -316,7 +359,11 @@ public struct RAVESleeveTileView: View {
         let shape = RoundedRectangle(cornerRadius: height * 0.22, style: .continuous)
         let lit = d.state.isOn || d.isPressed
         ZStack {
-            shape.fill(.ultraThinMaterial)
+            // A plain fill, not a material: a material is a live blur of
+            // what is behind each tile, redrawn every frame, and five of them
+            // on a moving arm broke up into blocks once the headset was hot
+            // and short of frames (worn 2026-11-12).
+            shape.fill(Color(white: 0.12).opacity(0.72))
             shape.fill(tint.opacity(lit ? 0.45 : (d.tile.role == .normal ? 0 : 0.18)))
             shape.fill(.white.opacity(Double(d.flash) * 0.45))
             shape.strokeBorder(tint.opacity(0.25 + Double(d.hover) * 0.6), lineWidth: 1 + CGFloat(d.hover) * 2)
@@ -421,7 +468,7 @@ public struct RAVESleeveRadialWheel: View {
                     inner: CGFloat(wedge.innerRadius) * ppm, outer: CGFloat(wedge.outerRadius) * ppm, inset: 2)
                 let tint: Color = wedge.entry.role == .destructive ? .red : .accentColor
                 ZStack {
-                    shape.fill(.ultraThinMaterial)
+                    shape.fill(Color(white: 0.12).opacity(0.72))
                     shape.fill(tint.opacity(wedge.isArmed ? 0.5 : 0.08))
                     if let confirm = wedge.confirm {
                         shape.fill(.white.opacity(Double(confirm) * 0.35))
@@ -439,7 +486,7 @@ public struct RAVESleeveRadialWheel: View {
             }
             let hub = CGFloat(model.geometry.inner) * 2 * ppm
             ZStack {
-                Circle().fill(.ultraThinMaterial)
+                Circle().fill(Color(white: 0.12).opacity(0.72))
                 if let label = model.armedLabel {
                     Text(label).font(.system(size: hub * 0.2, weight: .semibold)).lineLimit(2)
                         .multilineTextAlignment(.center).minimumScaleFactor(0.5).padding(hub * 0.1)

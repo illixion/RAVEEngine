@@ -134,6 +134,22 @@ private func over(_ snapshot: RAVESleeveSnapshot, _ id: String, x: Float = 0, he
         #expect(simd_distance(frame.normal(angle: 0, distance: frame.length), [-1, 0, 0]) < 1e-4)
     }
 
+    @Test func anArmInItsWristJointsSpaceSquaresToTheAxes() throws {
+        // A few degrees off the joint's axes, as measured on the headset.
+        let arm = RAVESleeveArm(side: .left, wrist: [0.001, 0, 0.002], elbow: [0.24, 0.002, -0.006],
+                                palm: RAVEPalmPose(position: [-0.05, 0, 0], palmNormalOut: [0, -0.99, 0.07],
+                                                   fingersDirection: [-1, 0, 0.02]))
+        let squared = try #require(arm.squaredToAxes(length: 0.24))
+        let frame = try #require(RAVESleeveFrame(arm: squared))
+        #expect(frame.origin == .zero)
+        #expect(frame.along == [1, 0, 0])
+        #expect(frame.back == [0, 1, 0])
+        // And the mirrored joint frame of the other hand squares to its own signs.
+        let mirrored = arm.transformed(by: simd_float4x4(simd_quatf(angle: .pi, axis: [0, 0, 1])))
+        let other = try #require(mirrored.squaredToAxes())
+        #expect(try #require(RAVESleeveFrame(arm: other)).along == [-1, 0, 0])
+    }
+
     @Test func facingIsOneSquareOnAndNegativeBehind() throws {
         let frame = try #require(RAVESleeveFrame(arm: makeArm()))
         let head = frame.point(distance: 0.1, angle: 0, radius: 0.5)
