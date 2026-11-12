@@ -54,7 +54,11 @@ public struct PoseSolver: Sendable {
     /// Joint indices ordered so a parent always precedes its children.
     public let order: [Int]
 
-    /// A run of joints, each the direct parent of the next, root first.
+    /// A run of joints, root first, each above the next: usually its parent,
+    /// but a limb modelled in segments has them in between (Blender's Rigify
+    /// splits every limb bone in two: `upper_arm`, `upper_arm.001`,
+    /// `forearm`). A solve turns the chain's joints and carries the segments
+    /// rigidly on the joint above them.
     public struct Chain: Sendable, Equatable {
         public var joints: [Int]
         public init(joints: [Int]) { self.joints = joints }
@@ -124,7 +128,9 @@ public struct PoseSolver: Sendable {
         }
     }
 
-    /// Validates that `joints` really is a parent-to-child run.
+    /// Validates that `joints` really is a run down the skeleton: each joint
+    /// the parent of the next, or above it by at most `maxSegmentJoints`
+    /// segments.
     ///
     /// Returns nil rather than repairing it. A rig can be shaped any way at
     /// all, and a solver that treats an unrelated joint as the next link
@@ -133,10 +139,41 @@ public struct PoseSolver: Sendable {
     public func chain(_ joints: [Int]) -> Chain? {
         guard joints.count >= 2,
               joints.allSatisfy({ $0 >= 0 && $0 < parents.count }) else { return nil }
-        for (parent, child) in zip(joints, joints.dropFirst()) where parents[child] != parent {
+        for (parent, child) in zip(joints, joints.dropFirst()) where segments(from: parent, to: child) == nil {
             return nil
         }
         return Chain(joints: joints)
+    }
+
+    /// How many segment joints one link of a chain may pass through. Rigify
+    /// puts one between each pair of limb joints; a run further down than
+    /// this is not a limb bone but a path across the body.
+    public static let maxSegmentJoints = 2
+
+    /// The joints strictly between `ancestor` and `descendant`, top first:
+    /// empty for a direct child, nil when `descendant` is not below
+    /// `ancestor` within `maxSegmentJoints` of them.
+    public func segments(from ancestor: Int, to descendant: Int) -> [Int]? {
+        guard descendant >= 0, descendant < parents.count else { return nil }
+        var between: [Int] = []
+        var cursor = parents[descendant]
+        while let at = cursor, at >= 0, at < parents.count {
+            if at == ancestor { return between.reversed() }
+            guard between.count < Self.maxSegmentJoints else { return nil }
+            between.append(at)
+            cursor = parents[at]
+        }
+        return nil
+    }
+
+    /// Where `descendant` sits relative to `ancestor`: its local matrix under
+    /// those of the segments between them. A joint that is not below
+    /// `ancestor` is taken as its direct child, as chains made with
+    /// `Chain(joints:)` always were.
+    public func offset(from ancestor: Int, to descendant: Int, pose: [JointPose]) -> float4x4 {
+        var matrix = matrix_identity_float4x4
+        for joint in segments(from: ancestor, to: descendant) ?? [] { matrix = matrix * pose[joint].matrix }
+        return matrix * pose[descendant].matrix
     }
 
     // MARK: - Kinematics
@@ -286,7 +323,7 @@ public struct PoseSolver: Sendable {
             var local = pose[joint]
             let here = parentMatrix * local.matrix
             let origin = Self.translation(of: here)
-            let childNow = Self.translation(of: here * pose[child].matrix)
+            let childNow = Self.translation(of: here * offset(from: joint, to: child, pose: pose))
             let old = Self.normalized(childNow - origin)
             let new = Self.normalized(positions[step + 1] - origin)
             var turn = Self.rotation(from: old, to: new)
@@ -303,6 +340,12 @@ public struct PoseSolver: Sendable {
             pose[joint] = local
             parentMatrix = parentMatrix * local.matrix
             model[joint] = parentMatrix
+            // The segments ride on it, kept current: the next link turns
+            // from the joint it really hangs from.
+            for segment in segments(from: joint, to: child) ?? [] {
+                parentMatrix = parentMatrix * pose[segment].matrix
+                model[segment] = parentMatrix
+            }
         }
         // The tip carries no child in this chain, so its orientation is
         // whatever its parent handed it; only its model matrix is refreshed.

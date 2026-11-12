@@ -92,11 +92,12 @@ struct PoseSolverTests {
         #expect(simd_distance(Self.tip(solver, pose), SIMD3<Float>(0, -2, 0)) < 1e-4)
     }
 
-    @Test("a chain that is not a parent-to-child run is refused")
+    @Test("a chain that is not a run down the skeleton is refused")
     func chainValidation() {
         // 0 -> 1 -> 2, and a sibling 3 hanging off the root.
         let solver = PoseSolver(parents: [nil, 0, 1, 0])
         #expect(solver.chain([0, 1, 2]) != nil)
+        #expect(solver.chain([0, 2]) != nil)      // through 1, a segment
         #expect(solver.chain([0, 1, 3]) == nil)   // 3's parent is 0, not 1
         #expect(solver.chain([2, 1, 0]) == nil)   // right joints, wrong direction
         #expect(solver.chain([1]) == nil)         // too short
@@ -153,5 +154,47 @@ struct PoseSolverTests {
         let p = (0...2).map { PoseSolver.translation(of: m[$0]) }
         #expect(abs(simd_distance(p[0], p[1]) - 1) < 1e-4)
         #expect(abs(simd_distance(p[1], p[2]) - 2) < 1e-4)
+    }
+
+    /// Blender's Rigify splits every limb bone in two: shoulder,
+    /// `upper_arm.001`, elbow, `forearm.001`, hand, each half a bone long.
+    /// The solve treats shoulder → elbow → hand as two bones, and the halves
+    /// ride on the joint above them, staying on its bone.
+    @Test("a limb split into segments solves as two bones, its segments riding along")
+    func segmentedLimb() throws {
+        let half = JointPose(translation: SIMD3<Float>(0, -0.5, 0))
+        let rest = [JointPose(), half, half, half, half]
+        let solver = PoseSolver(parents: [nil, 0, 1, 2, 3])
+        #expect(solver.segments(from: 0, to: 2) == [1])
+        #expect(solver.segments(from: 0, to: 1) == [])
+        #expect(solver.chain([0, 4]) == nil)          // three between: not a limb bone
+        let chain = try #require(solver.chain([0, 2, 4]))
+
+        for closedForm in [false, true] {
+            var pose = rest
+            var model = solver.modelMatrices(of: pose)
+            let target = SIMD3<Float>(0.9, -1.1, 0.2)
+            let report = closedForm
+                ? solver.solveLeg(chain: chain, target: target, pole: SIMD3(0, 0, 1), pose: &pose, model: &model)
+                : solver.solve(chain: chain, target: target, pole: SIMD3(0, 0, 1), pose: &pose, model: &model)
+            #expect(report.reached)
+            // Forward kinematics agrees with the solver's running matrices,
+            // segments included: they were kept current, not left stale.
+            let replay = solver.modelMatrices(of: pose)
+            for joint in 0..<5 {
+                #expect(simd_distance(PoseSolver.translation(of: replay[joint]),
+                                      PoseSolver.translation(of: model[joint])) < 1e-4)
+            }
+            let p = (0..<5).map { PoseSolver.translation(of: replay[$0]) }
+            #expect(simd_distance(p[4], target) < 2e-3)
+            // Each segment sits halfway along its bone, which stayed straight.
+            #expect(simd_distance(p[1], (p[0] + p[2]) / 2) < 1e-4)
+            #expect(simd_distance(p[3], (p[2] + p[4]) / 2) < 1e-4)
+            #expect(abs(simd_distance(p[0], p[2]) - 1) < 1e-4)
+            // It bent: the elbow is off the shoulder-to-hand line.
+            let line = simd_normalize(p[4] - p[0])
+            let off = (p[2] - p[0]) - simd_dot(p[2] - p[0], line) * line
+            #expect(simd_length(off) > 0.1)
+        }
     }
 }

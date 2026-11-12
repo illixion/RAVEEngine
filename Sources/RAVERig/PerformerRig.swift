@@ -1232,12 +1232,15 @@ public struct PerformerRig: Sendable {
         // the wrist does not wring.
         let forearmModel = currentModel(forearm, pose: pose, model: model)
         let forearmRotation = PoseSolver.rotation(of: forearmModel)
-        let along = pose[hand].translation
+        // The forearm's length in its own frame, to the hand through any
+        // segment between them (Rigify's `forearm.001`).
+        let along = PoseSolver.translation(of: solver.offset(from: forearm, to: hand, pose: pose))
         if simd_length(along) > 1e-6, tuning.forearmTwistShare > 0 {
             // The change the hand is about to make, in the forearm's frame;
             // its twist about the bone is the part the forearm shares.
             let local = simd_normalize(forearmRotation.inverse * target)
-            let change = simd_normalize(local * pose[hand].rotation.inverse)
+            let now = simd_normalize(forearmRotation.inverse * current)
+            let change = simd_normalize(local * now.inverse)
             let axis = simd_normalize(along)
             let twist = Self.twist(of: change, about: axis)
             let share = simd_slerp(Self.identity, twist, tuning.forearmTwistShare)
@@ -1388,7 +1391,7 @@ public struct PerformerRig: Sendable {
             let now: SIMD3<Float>
             if offset + 1 < chain.count {
                 let child = chain[offset + 1]
-                now = PoseSolver.translation(of: here * pose[child].matrix) - origin
+                now = PoseSolver.translation(of: here * solver.offset(from: joint, to: child, pose: pose)) - origin
             } else if let axis = boneAxis[joint] {
                 now = PoseSolver.rotation(of: here).act(axis)
             } else {

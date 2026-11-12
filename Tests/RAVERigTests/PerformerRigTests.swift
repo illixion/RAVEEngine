@@ -546,4 +546,55 @@ struct PerformerRigTests {
         for i in 0..<90 { out = filter.filter(SIMD3(1 + Float(i) / 90, 1, 1), deltaTime: 1 / 90) }
         #expect(abs(out.x - 2) < 0.05)
     }
+
+    /// The test skeleton with each arm bone split in two the way Blender's
+    /// Rigify splits them: `upper_arm.001` between shoulder and elbow,
+    /// `forearm.001` between elbow and wrist, appended so every other joint
+    /// keeps its index. Mal0's arms are built this way.
+    static func segmentedSkeleton() -> (skeleton: PerformerRig.Skeleton, segments: [Int]) {
+        var base = skeleton()
+        var parents = base.parents, rest = base.rest
+        var segments: [Int] = []
+        for (upper, fore, hand) in [(leftUpper, leftFore, leftHand), (rightUpper, rightFore, rightHand)] {
+            for (top, below) in [(upper, fore), (fore, hand)] {
+                let segment = rest.count
+                let length = rest[below].translation
+                rest.append(JointPose(translation: length / 2))
+                parents.append(top)
+                rest[below].translation = length / 2
+                parents[below] = segment
+                segments.append(segment)
+            }
+        }
+        base.parents = parents
+        base.rest = rest
+        return (base, segments)
+    }
+
+    @Test("an arm split into segments reaches the wrist and turns the palm like a plain one")
+    func segmentedArm() throws {
+        let (skeleton, segments) = Self.segmentedSkeleton()
+        var rig = try #require(PerformerRig(skeleton))
+        let placement = rig.ownBodyPlacement(calibration: Self.calibration)
+        var frame = Self.leftArmOut()
+        let wrist = try #require(frame.left?.wrist)
+        frame.left = Self.hand(wrist: wrist, along: SIMD3(-1, 0, 0), palm: SIMD3(0, 1, 0), thumbSide: SIMD3(0, 0, 1))
+        var pose = rig.skeleton.rest
+        for _ in 0..<30 {
+            pose = rig.solve(base: rig.skeleton.rest, frame: frame, calibration: Self.calibration,
+                             mirrored: false, deltaTime: 1 / 90, placement: placement)
+        }
+        let model = Self.model(rig, pose)
+        func at(_ joint: Int) -> SIMD3<Float> { PoseSolver.translation(of: model[joint]) }
+        func world(_ joint: Int) -> SIMD3<Float> {
+            let p = placement * SIMD4<Float>(at(joint), 1)
+            return SIMD3(p.x, p.y, p.z)
+        }
+        #expect(simd_distance(world(Self.leftHand), wrist) < 0.01)
+        // The halves stay on their bones.
+        #expect(simd_distance(at(segments[0]), (at(Self.leftUpper) + at(Self.leftFore)) / 2) < 1e-3)
+        #expect(simd_distance(at(segments[1]), (at(Self.leftFore) + at(Self.leftHand)) / 2) < 1e-3)
+        // Palm up: the thumb side has swung from +Z to −Z, as on the plain arm.
+        #expect(at(Self.leftIndex[0]).z < at(Self.leftMiddle[0]).z)
+    }
 }
