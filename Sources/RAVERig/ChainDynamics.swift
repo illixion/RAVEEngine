@@ -47,8 +47,45 @@ public struct ChainDynamics: Sendable, Equatable {
         /// the chain is put down where it now is rather than whipped across
         /// the room to catch up.
         public var teleportDistance: Float = 0.5
+        /// Radius at the tip, when the chain tapers; nil keeps `thickness`
+        /// along the whole length.
+        public var tipThickness: Float?
+        /// How much of a particle's slide along a surface is lost each time
+        /// it is pushed out of one, 0...1. Zero is ice: a tail laid over a
+        /// hand slips off. Higher and it drapes and stays.
+        /// The hold is against the surface's own motion, so a moving hand
+        /// carries what lies on it.
+        public var friction: Float = 0
 
         public init() {}
+    }
+
+    /// A limb or a forearm the chain may not pass through: a capsule from
+    /// `a` to `b`.
+    public struct Capsule: Sendable, Equatable {
+        public var a: SIMD3<Float>
+        public var b: SIMD3<Float>
+        public var radius: Float
+
+        public init(a: SIMD3<Float>, b: SIMD3<Float>, radius: Float) {
+            self.a = a
+            self.b = b
+            self.radius = radius
+        }
+    }
+
+    /// A particle held at a point: a hand closed round the chain. The chain
+    /// between the base and the hold is drawn up to it as far as its length
+    /// allows; what is left over is `stretch`.
+    public struct Hold: Sendable, Equatable {
+        /// 1...count-1; the base is the body's.
+        public var particle: Int
+        public var point: SIMD3<Float>
+
+        public init(particle: Int, point: SIMD3<Float>) {
+            self.particle = particle
+            self.point = point
+        }
     }
 
     /// Something the chain may not pass through — a hand, in practice: a
@@ -58,14 +95,26 @@ public struct ChainDynamics: Sendable, Equatable {
     public struct Sphere: Sendable, Equatable {
         public var center: SIMD3<Float>
         public var radius: Float
+        /// How it is moving, metres a second: with `Settings.friction`, what
+        /// a chain resting on it is carried along by.
+        public var velocity: SIMD3<Float>
 
-        public init(center: SIMD3<Float>, radius: Float) {
+        public init(center: SIMD3<Float>, radius: Float, velocity: SIMD3<Float> = .zero) {
             self.center = center
             self.radius = radius
+            self.velocity = velocity
         }
     }
 
     public var settings: Settings
+    /// What is holding the chain this frame. Set before `step`; kept until
+    /// changed.
+    public var holds: [Hold] = []
+    /// How far the holds asked the chain to reach past its own length on the
+    /// last step, summed: from where each held particle ended up to where its
+    /// hold is. Zero while every hold is within reach. This is the pull a
+    /// hand puts on whatever the base is attached to.
+    public private(set) var stretch: SIMD3<Float> = .zero
     /// Current particle positions, base first. The base is pinned to the
     /// animated base every step.
     public private(set) var positions: [SIMD3<Float>]
@@ -98,8 +147,14 @@ public struct ChainDynamics: Sendable, Equatable {
     ///     enforced, so a rescaled character rescales the chain.
     ///   - floor: height nothing may sink below, when there is a floor.
     ///   - obstacles: volumes the chain is kept out of, this frame.
+    ///   - capsules: limbs it is kept out of.
+    ///   - measuring: the shape the segment lengths are read from, when
+    ///     `shape` has been bent into something the chain is only drawn
+    ///     toward (a curl) and no longer has the chain's own lengths.
     public mutating func step(toward shape: [SIMD3<Float>], deltaTime: Float, floor: Float? = nil,
-                              obstacles: [Sphere] = []) {
+                              obstacles: [Sphere] = [], capsules: [Capsule] = [],
+                              measuring: [SIMD3<Float>]? = nil) {
+        stretch = .zero
         guard shape.count == positions.count, shape.count >= 2 else {
             reset(to: shape)
             return
@@ -108,7 +163,8 @@ public struct ChainDynamics: Sendable, Equatable {
             reset(to: shape)
             return
         }
-        lengths = Self.lengths(of: shape)
+        let held = holds.filter { $0.particle >= 1 && $0.particle < positions.count }
+        lengths = Self.lengths(of: measuring.flatMap { $0.count == shape.count ? $0 : nil } ?? shape)
         let total = min(max(deltaTime, 0), 0.1)
         guard total > 0 else { return }
         let steps = max(1, Int((total / settings.substep).rounded(.up)))
@@ -126,9 +182,26 @@ public struct ChainDynamics: Sendable, Equatable {
                 previous[i] = positions[i]
                 positions[i] = next
             }
-            // Constraints, base outward, a few passes so the bend limit and
-            // the lengths agree with each other.
+            // Constraints, a few passes so the holds, the bend limit and the
+            // lengths agree with each other.
             for _ in 0..<3 {
+                // A held particle goes to its hold, and draws the chain
+                // between it and the base after it. The pass outward from the
+                // base then has the last word, so the base stays the body's
+                // and a hold further off than the chain reaches leaves the
+                // chain taut, pointing at it.
+                for hold in held {
+                    positions[hold.particle] = hold.point
+                    var i = hold.particle
+                    while i > 1 {
+                        let toward = positions[i - 1] - positions[i]
+                        let distance = simd_length(toward)
+                        if distance > 1e-6 {
+                            positions[i - 1] = positions[i] + toward / distance * lengths[i - 1]
+                        }
+                        i -= 1
+                    }
+                }
                 for i in 1..<positions.count {
                     var direction = positions[i] - positions[i - 1]
                     let distance = simd_length(direction)
@@ -139,34 +212,70 @@ public struct ChainDynamics: Sendable, Equatable {
                         direction = Self.limited(direction, toward: along, maxBend: maxBend)
                     }
                     positions[i] = positions[i - 1] + direction * lengths[i - 1]
-                    if let floor, positions[i].y < floor { positions[i].y = floor }
+                    if let floor, positions[i].y < floor {
+                        positions[i].y = floor
+                        slow(i, along: SIMD3<Float>(0, 1, 0), surface: .zero)
+                    }
                     // The whole segment is solid, not just its ends: the
                     // joints sit a hand's breadth apart, and a fingertip
                     // between two of them has to meet something. The
                     // segment is a capsule of the chain's thickness; the
                     // push lands on its two ends in proportion to where
-                    // along it the hand is, and never on the pinned base.
+                    // along it the contact is, and never on the pinned base.
+                    let radius = thickness(ofSegment: i)
                     for sphere in obstacles {
-                        let a = positions[i - 1], b = positions[i]
-                        let (closest, t) = Self.closestPoint(on: a, b, to: sphere.center)
-                        let away = closest - sphere.center
-                        let distance = simd_length(away)
-                        let reach = sphere.radius + settings.thickness
-                        guard distance < reach else { continue }
-                        // A segment dead on the centre has no way out; send
-                        // it up, which for a hand under a tail is right.
-                        let outward = distance > 1e-5 ? away / distance : SIMD3<Float>(0, 1, 0)
-                        let push = outward * (reach - distance)
-                        if i - 1 > 0 {
-                            positions[i - 1] += push * (1 - t)
-                            positions[i] += push * t
-                        } else {
-                            positions[i] += push
-                        }
+                        let (closest, t) = Self.closestPoint(on: positions[i - 1], positions[i], to: sphere.center)
+                        push(segment: i, at: t, away: closest - sphere.center, reach: sphere.radius + radius,
+                             surface: sphere.velocity * h)
+                    }
+                    for capsule in capsules {
+                        let (onChain, t, onCapsule) = Self.closestPoints(positions[i - 1], positions[i],
+                                                                         capsule.a, capsule.b)
+                        push(segment: i, at: t, away: onChain - onCapsule, reach: capsule.radius + radius,
+                             surface: .zero)
                     }
                 }
             }
         }
+        for hold in held { stretch += hold.point - positions[hold.particle] }
+    }
+
+    /// The chain's radius at segment `i` (between particles `i - 1` and `i`).
+    public func thickness(ofSegment i: Int) -> Float {
+        guard let tip = settings.tipThickness, positions.count > 2 else { return settings.thickness }
+        let t = (Float(i) - 0.5) / Float(positions.count - 1)
+        return settings.thickness + (tip - settings.thickness) * min(max(t, 0), 1)
+    }
+
+    /// Moves segment `i` out of something it is `away` from by less than
+    /// `reach`, the push shared between its two ends by where along it the
+    /// contact is.
+    private mutating func push(segment i: Int, at t: Float, away: SIMD3<Float>, reach: Float,
+                               surface: SIMD3<Float>) {
+        let distance = simd_length(away)
+        guard distance < reach else { return }
+        // A segment dead on the centre has no way out; send it up, which
+        // for a hand under a tail is right.
+        let outward = distance > 1e-5 ? away / distance : SIMD3<Float>(0, 1, 0)
+        let push = outward * (reach - distance)
+        if i - 1 > 0 {
+            positions[i - 1] += push * (1 - t)
+            positions[i] += push * t
+            slow(i - 1, along: outward, surface: surface)
+        } else {
+            positions[i] += push
+        }
+        slow(i, along: outward, surface: surface)
+    }
+
+    /// Friction: takes `settings.friction` of particle `i`'s slide across a
+    /// surface whose normal is `normal` and which itself moves `surface`
+    /// this substep.
+    private mutating func slow(_ i: Int, along normal: SIMD3<Float>, surface: SIMD3<Float>) {
+        guard settings.friction > 0 else { return }
+        let velocity = positions[i] - previous[i] - surface
+        let sliding = velocity - normal * simd_dot(velocity, normal)
+        previous[i] += sliding * min(settings.friction, 1)
     }
 
     /// Whether any segment is inside one of `obstacles`, for diagnostics.
@@ -188,6 +297,38 @@ public struct ChainDynamics: Sendable, Equatable {
         guard length > 1e-10 else { return (a, 0) }
         let t = simd_clamp(simd_dot(point - a, ab) / length, 0, 1)
         return (a + ab * t, t)
+    }
+
+    /// The nearest points of segments `p1`–`q1` and `p2`–`q2`: the point on
+    /// the first, how far along the first it lies, and the point on the
+    /// second.
+    static func closestPoints(_ p1: SIMD3<Float>, _ q1: SIMD3<Float>, _ p2: SIMD3<Float>,
+                              _ q2: SIMD3<Float>) -> (SIMD3<Float>, Float, SIMD3<Float>) {
+        let d1 = q1 - p1, d2 = q2 - p2, r = p1 - p2
+        let a = simd_dot(d1, d1), e = simd_dot(d2, d2), f = simd_dot(d2, r)
+        var s: Float = 0, t: Float = 0
+        if a <= 1e-10 && e <= 1e-10 { return (p1, 0, p2) }
+        if a <= 1e-10 {
+            t = simd_clamp(f / e, 0, 1)
+        } else {
+            let c = simd_dot(d1, r)
+            if e <= 1e-10 {
+                s = simd_clamp(-c / a, 0, 1)
+            } else {
+                let b = simd_dot(d1, d2)
+                let denominator = a * e - b * b
+                s = denominator > 1e-10 ? simd_clamp((b * f - c * e) / denominator, 0, 1) : 0
+                t = (b * s + f) / e
+                if t < 0 {
+                    t = 0
+                    s = simd_clamp(-c / a, 0, 1)
+                } else if t > 1 {
+                    t = 1
+                    s = simd_clamp((b - c) / a, 0, 1)
+                }
+            }
+        }
+        return (p1 + d1 * s, s, p2 + d2 * t)
     }
 
     /// `direction`, rotated toward `along` until they are within `maxBend`.

@@ -295,3 +295,90 @@ extension ChainObstacleTests {
         #expect(abs(total - 0.128 * 9) < 1e-3)
     }
 }
+
+/// What hands and limbs do to a chain: a hold carries a joint with it and
+/// reports what it could not reach, a limb is kept out of, and friction
+/// lets a chain laid over something stay on it.
+@Suite struct ChainHoldTests {
+
+    private func tail(base: SIMD3<Float> = [0, 0.97, 0], count: Int = 10, spacing: Float = 0.128) -> [SIMD3<Float>] {
+        (0..<count).map { base + SIMD3<Float>(0, 0, spacing * Float($0)) }
+    }
+
+    private func settle(_ chain: inout ChainDynamics, toward shape: [SIMD3<Float>], seconds: Float, fps: Float = 90) {
+        for _ in 0..<Int(seconds * fps) { chain.step(toward: shape, deltaTime: 1 / fps) }
+    }
+
+    private func totalLength(_ positions: [SIMD3<Float>]) -> Float {
+        zip(positions, positions.dropFirst()).reduce(0) { $0 + simd_length($1.1 - $1.0) }
+    }
+
+    @Test func aHoldWithinReachIsMetAndNothingIsStretched() {
+        let shape = tail()
+        var chain = ChainDynamics(shape: shape)
+        let point = shape[6] + SIMD3<Float>(0.2, 0.25, -0.1)
+        chain.holds = [.init(particle: 6, point: point)]
+        settle(&chain, toward: shape, seconds: 1)
+        #expect(simd_distance(chain.positions[6], point) < 1e-3)
+        #expect(simd_length(chain.stretch) < 1e-3)
+        #expect(abs(totalLength(chain.positions) - totalLength(shape)) < 1e-3)
+        #expect(chain.positions[0] == shape[0])
+    }
+
+    @Test func aHoldOutOfReachLeavesTheChainTautAndReportsTheRest() {
+        let shape = tail()
+        var chain = ChainDynamics(shape: shape)
+        // 30 cm further than the chain's length to that particle, straight up.
+        let reach = 6 * Float(0.128)
+        let point = shape[0] + SIMD3<Float>(0, reach + 0.3, 0)
+        chain.holds = [.init(particle: 6, point: point)]
+        settle(&chain, toward: shape, seconds: 1)
+        #expect(abs(simd_distance(chain.positions[6], shape[0]) - reach) < 2e-3)
+        #expect(abs(chain.stretch.y - 0.3) < 5e-3)
+        #expect(abs(chain.stretch.x) < 5e-3 && abs(chain.stretch.z) < 5e-3)
+    }
+
+    @Test func aLimbAcrossTheChainKeepsItOut() {
+        let shape = tail()
+        var chain = ChainDynamics(shape: shape)
+        // A shin standing in the middle of where the tail hangs.
+        let limb = ChainDynamics.Capsule(a: [0, 0.3, 0.64], b: [0, 1.5, 0.64], radius: 0.06)
+        for _ in 0..<180 { chain.step(toward: shape, deltaTime: 1.0 / 90, capsules: [limb]) }
+        for i in 1..<chain.count {
+            let (onChain, _, onLimb) = ChainDynamics.closestPoints(chain.positions[i - 1], chain.positions[i],
+                                                                   limb.a, limb.b)
+            #expect(simd_distance(onChain, onLimb) > limb.radius + chain.settings.thickness - 2e-3)
+        }
+    }
+
+    @Test func aTaperedChainIsThinnerAtItsTip() {
+        var settings = ChainDynamics.Settings()
+        settings.thickness = 0.05
+        settings.tipThickness = 0.01
+        let chain = ChainDynamics(shape: tail(), settings: settings)
+        #expect(chain.thickness(ofSegment: 1) > chain.thickness(ofSegment: 5))
+        #expect(chain.thickness(ofSegment: 5) > chain.thickness(ofSegment: 9))
+        #expect(chain.thickness(ofSegment: 9) > 0.01)
+    }
+
+    @Test func frictionCarriesAChainAlongWithTheHandItLiesOn() {
+        // A hand raised into the chain from below, then moved sideways: with
+        // friction the chain goes with it further than it does on ice.
+        func carried(friction: Float) -> Float {
+            var settings = ChainDynamics.Settings()
+            settings.friction = friction
+            let shape = tail()
+            var chain = ChainDynamics(shape: shape, settings: settings)
+            var hand = ChainDynamics.Sphere(center: [0, 0.88, 0.9], radius: 0.06)
+            for _ in 0..<180 { chain.step(toward: shape, deltaTime: 1.0 / 90, obstacles: [hand]) }
+            #expect(chain.touches([.init(center: hand.center, radius: hand.radius + 0.005)]))
+            hand.velocity = [0.1 * 90 / 45, 0, 0]
+            for _ in 0..<45 {
+                hand.center.x += 0.1 / 45
+                chain.step(toward: shape, deltaTime: 1.0 / 90, obstacles: [hand])
+            }
+            return chain.positions[7].x
+        }
+        #expect(carried(friction: 0.8) > carried(friction: 0) + 0.02)
+    }
+}

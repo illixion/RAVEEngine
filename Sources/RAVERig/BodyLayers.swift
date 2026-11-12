@@ -29,16 +29,23 @@ public struct BodyLayers: Sendable {
         /// The tail, base first, each joint the parent of the next. Empty for
         /// a character with none.
         public var tail: [String]
+        /// The pelvis: what a pull on the tail shifts.
+        public var hips: String?
+        /// Each leg from the thigh down, for keeping the tail out of them.
+        public var legs: [[String]]
         /// The way the character faces, in the skeleton's model space.
         public var forward: SIMD3<Float>
         /// Up, in the skeleton's model space (a Blender export's is +Z).
         public var up: SIMD3<Float>
 
         public init(head: String? = nil, neck: [String] = [], tail: [String] = [],
+                    hips: String? = nil, legs: [[String]] = [],
                     forward: SIMD3<Float> = SIMD3(0, 0, 1), up: SIMD3<Float> = SIMD3(0, 1, 0)) {
             self.head = head
             self.neck = neck
             self.tail = tail
+            self.hips = hips
+            self.legs = legs
             self.forward = forward
             self.up = up
         }
@@ -50,6 +57,8 @@ public struct BodyLayers: Sendable {
             head = rig.joints[landmarks.head].name
             neck = landmarks.neck.map { [rig.joints[$0].name] } ?? []
             tail = TailArchitecture.find(landmarks: landmarks, rig: rig)?.chain.map { rig.joints[$0].name } ?? []
+            hips = rig.joints[landmarks.hips].name
+            legs = [landmarks.leftLeg, landmarks.rightLeg].map { leg in leg.map { rig.joints[$0].name } }
             self.forward = forward
             self.up = up
         }
@@ -67,18 +76,48 @@ public struct BodyLayers: Sendable {
         public var lookAt: SIMD3<Float>?
         /// Height nothing may sink below, when there is a floor.
         public var floor: Float?
-        /// The wearer's hands, as spheres in world space.
+        /// The wearer's hands: what pushes, holds and is curled round.
+        public var hands: [Hand]
+        /// Anything else to stay out of, as spheres in world space.
         public var obstacles: [ChainDynamics.Sphere]
 
         public init(modelToWorld: float4x4, deltaTime: Float, sizeScale: Float = 1,
                     lookAt: SIMD3<Float>? = nil, floor: Float? = nil,
-                    obstacles: [ChainDynamics.Sphere] = []) {
+                    hands: [Hand] = [], obstacles: [ChainDynamics.Sphere] = []) {
             self.modelToWorld = modelToWorld
             self.deltaTime = deltaTime
             self.sizeScale = sizeScale
             self.lookAt = lookAt
             self.floor = floor
+            self.hands = hands
             self.obstacles = obstacles
+        }
+
+        /// Everything solid this frame, as spheres.
+        var spheres: [ChainDynamics.Sphere] { obstacles + hands.flatMap(\.spheres) }
+    }
+
+    /// One of the wearer's hands near a body, world space.
+    public struct Hand: Sendable, Equatable {
+        /// Stable while the hand is tracked (0 left, 1 right), so a grip
+        /// stays with the hand that took it.
+        public var id: Int
+        /// The palm and fingers, as spheres: what pushes.
+        public var spheres: [ChainDynamics.Sphere]
+        /// The middle of the closing hand: where something held sits.
+        public var grip: SIMD3<Float>
+        /// The palm's radius: what a tail curls round.
+        public var radius: Float
+        /// 0 open, 1 a fist.
+        public var closure: Float
+
+        public init(id: Int, spheres: [ChainDynamics.Sphere], grip: SIMD3<Float>, radius: Float = 0.045,
+                    closure: Float = 0) {
+            self.id = id
+            self.spheres = spheres
+            self.grip = grip
+            self.radius = radius
+            self.closure = closure
         }
     }
 
@@ -96,6 +135,29 @@ public struct BodyLayers: Sendable {
     public var jiggleTouch = true
     /// Jiggle requests left to the tail layer, because they name its joints.
     public private(set) var jiggleOnTail: [String] = []
+    /// The pelvis joint, which a pull on the tail shifts. Nil leaves the body
+    /// where it is, whatever is done to the tail.
+    public let hips: Int?
+    /// Leg joints, thigh down, per leg: the tail is kept out of them.
+    public let legs: [[Int]]
+    /// How the body gives to a pull on the tail.
+    public var give = Give()
+    /// The hips' offset from the pose they were given, world space, as of
+    /// the last frame: the tug of a held tail, eased.
+    public private(set) var bodyShift: SIMD3<Float> = .zero
+    private var shiftedThisFrame = false
+
+    /// How far the hips follow a pull on the tail.
+    public struct Give: Sendable, Equatable {
+        /// Metres the hips move per metre the tail is stretched past its
+        /// length.
+        public var gain: Float = 0.6
+        /// The most the hips move, metres at natural size.
+        public var limit: Float = 0.06
+        /// Seconds to follow a pull, or to come back from one.
+        public var time: Float = 0.12
+        public init() {}
+    }
 
     /// - Parameters:
     ///   - jointNames: the pose's joints, in the pose's order.
@@ -119,6 +181,8 @@ public struct BodyLayers: Sendable {
         if chain.count == rig.tail.count {
             tail = TailLayer(chain: chain, solver: solver)
         }
+        hips = rig.hips.flatMap(find)
+        legs = rig.legs.map { $0.compactMap(find) }.filter { $0.count >= 2 }
         var specs = jiggle
         if tail != nil {
             let onTail = Set(chain.map { leaves[$0] })
@@ -136,15 +200,58 @@ public struct BodyLayers: Sendable {
     /// Lays this frame's layers onto `pose`.
     public mutating func apply(to pose: inout [JointPose], frame: Frame) {
         guard pose.count == solver.parents.count else { return }
+        if !shiftedThisFrame {
+            shiftBody(&pose, modelToWorld: frame.modelToWorld, deltaTime: frame.deltaTime, sizeScale: frame.sizeScale)
+        }
+        shiftedThisFrame = false
         look?.apply(to: &pose, solver: solver, modelToWorld: frame.modelToWorld,
                     target: frame.lookAt, deltaTime: frame.deltaTime)
-        tail?.apply(to: &pose, solver: solver, frame: frame)
+        if tail != nil {
+            let model = solver.modelMatrices(of: pose)
+            // The legs, as capsules a twelfth of a metre thick at a person's
+            // size: thinner than a thigh, so the tail is kept out of the
+            // legs without being held off them.
+            var limbs: [ChainDynamics.Capsule] = []
+            for leg in legs {
+                let points = leg.map { PoseSolver.translation(of: frame.modelToWorld * model[$0]) }
+                for (a, b) in zip(points, points.dropFirst()) {
+                    limbs.append(.init(a: a, b: b, radius: 0.13 * simd_distance(a, b)))
+                }
+            }
+            tail?.apply(to: &pose, solver: solver, frame: frame, limbs: limbs)
+        }
         if jiggleEnabled {
             jiggle?.apply(to: &pose, modelToWorld: frame.modelToWorld, deltaTime: frame.deltaTime,
-                          sizeScale: frame.sizeScale, obstacles: jiggleTouch ? frame.obstacles : [])
+                          sizeScale: frame.sizeScale, obstacles: jiggleTouch ? frame.spheres : [])
         } else {
             jiggle?.reset()
         }
+    }
+
+    /// Moves the hips by the pull the tail carried on the last frame: a held
+    /// tail tugs the body it is attached to.
+    ///
+    /// A host that places feet calls this before its leg solve, so the feet
+    /// stay planted while the hips give. `apply` does it itself for a host
+    /// that does not, and the legs then ride along.
+    public mutating func shiftBody(_ pose: inout [JointPose], modelToWorld: float4x4, deltaTime: Float,
+                                   sizeScale: Float = 1) {
+        shiftedThisFrame = true
+        guard let hips, pose.count == solver.parents.count else { return }
+        var wanted = (tail?.pull ?? .zero) * give.gain
+        let limit = give.limit * max(sizeScale, 1e-3)
+        let length = simd_length(wanted)
+        if length > limit { wanted *= limit / length }
+        let dt = min(max(deltaTime, 0), 0.1)
+        bodyShift += (wanted - bodyShift) * min(1, dt / max(give.time, 1e-3))
+        guard simd_length(bodyShift) > 1e-5 else { return }
+        // World offset into the space the hips' translation is written in.
+        var parentToWorld = modelToWorld
+        if let parent = solver.parents[hips], parent >= 0 {
+            parentToWorld = modelToWorld * solver.modelMatrices(of: pose)[parent]
+        }
+        let local = parentToWorld.inverse * SIMD4<Float>(bodyShift, 0)
+        pose[hips].translation += SIMD3<Float>(local.x, local.y, local.z)
     }
 
     /// Starts every simulation over from the pose it is next given: for a
@@ -152,6 +259,7 @@ public struct BodyLayers: Sendable {
     public mutating func reset() {
         tail?.reset()
         jiggle?.reset()
+        bodyShift = .zero
     }
 
     static func leaf(_ name: String) -> String {
@@ -353,11 +461,22 @@ public struct LookLayer: Sendable {
 // MARK: - Tail
 
 /// A tail on a pose: carried round after the body, swung by its mood,
-/// simulated as a chain that sags, trails and meets hands and the floor,
-/// then laid back onto the joints.
+/// simulated as a chain that sags, trails and meets hands, legs and the
+/// floor, then laid back onto the joints.
 ///
 /// The pose it is given says where the body carries the tail this frame;
 /// that shape is what the simulation is drawn toward, never what is drawn.
+///
+/// A hand does three things to it:
+/// - **Open**, it pushes: the tail rests on a palm and, with friction,
+///   stays there.
+/// - **Closing on it**, it holds: the nearest joint goes with the hand. A
+///   hold further off than the tail reaches leaves it taut, and the rest is
+///   `pull`: what the body it hangs from feels (`BodyLayers.shiftBody`).
+///   Pulled harder than the grip holds, the tail slides through the hand
+///   toward its tip and comes free.
+/// - **Near**, it is answered: with `affinity` above zero the tail curls
+///   round the hand, below zero it draws away from it.
 public struct TailLayer: Sendable {
     /// Joint indices, base first.
     public let chain: [Int]
@@ -366,15 +485,62 @@ public struct TailLayer: Sendable {
     public var settings = ChainDynamics.Settings()
     /// Off hands the tail back to the pose it is given, eased.
     public var enabled = true
-    /// Whether hands push it.
+    /// Whether hands push and hold it.
     public var touch = true
+    /// Whether a closing hand takes hold of it.
+    public var grabbable = true
+    /// A hand closed this far takes hold; opened past `gripExit` it lets go.
+    public var gripEnter: Float = 0.6
+    public var gripExit: Float = 0.3
+    /// Metres a fist can stretch the tail past its length before it starts
+    /// to slide through the hand. A looser hand holds less.
+    public var slipStretch: Float = 0.12
+    /// Seconds for the hold to slide one joint toward the tip while it slips.
+    public var slipTime: Float = 0.09
+    /// What the tail does about a hand near it: above zero it curls round
+    /// the hand, below zero it draws away. Its muscle, which a mood sets.
+    public var affinity: Float = 0
+    /// How near a hand's surface has to be for the tail to answer it, metres.
+    public var answerRange: Float = 0.12
     /// How much the simulation owns the tail right now, 0...1.
     public private(set) var weight: Float = 0
     public private(set) var dynamics: ChainDynamics?
     /// Whether a hand was against the tail on the last frame.
     public private(set) var touching = false
-    /// How many hand spheres were in play on the last frame.
+    /// How many solid spheres were in play on the last frame.
     public private(set) var obstacleCount = 0
+    /// The pull on the body on the last frame, world metres: how far the
+    /// hands holding the tail are asking it to reach past its length, eased.
+    public private(set) var pull: SIMD3<Float> = .zero
+    /// What happened on the last frame.
+    public private(set) var events: [Event] = []
+    /// The hand answered on the last frame (curled round or avoided), and
+    /// how strongly, 0...1.
+    public private(set) var answering: (hand: Int, amount: Float)?
+
+    public enum Event: Sendable, Equatable {
+        /// A hand took hold, at this joint of the chain.
+        case grabbed(hand: Int, joint: Int)
+        /// The hand let go.
+        case released(hand: Int)
+        /// The tail was pulled out of the hand.
+        case slipped(hand: Int)
+    }
+
+    struct Grip: Sendable, Equatable {
+        var particle: Int
+        var slipping: Float = 0
+    }
+    private var grips: [Int: Grip] = [:]
+    /// Seconds each hand has been closed, to tell a hand closing on the tail
+    /// from a fist brushing past it.
+    private var closedFor: [Int: Float] = [:]
+    private var lastObstacles: [SIMD3<Float>] = []
+
+    /// Whether any hand holds the tail.
+    public var held: Bool { !grips.isEmpty }
+    /// The joints of the chain held, by hand.
+    public var heldJoints: [Int: Int] { grips.mapValues(\.particle) }
 
     /// World positions of the joints as drawn on the last frame, base first.
     public var positions: [SIMD3<Float>] { dynamics?.positions ?? [] }
@@ -389,15 +555,22 @@ public struct TailLayer: Sendable {
     public mutating func reset() {
         dynamics = nil
         sway.snapHeading()
+        grips = [:]
+        pull = .zero
     }
 
-    mutating func apply(to pose: inout [JointPose], solver: PoseSolver, frame: BodyLayers.Frame) {
+    mutating func apply(to pose: inout [JointPose], solver: PoseSolver, frame: BodyLayers.Frame,
+                        limbs: [ChainDynamics.Capsule] = []) {
+        events = []
+        answering = nil
         let dt = min(max(frame.deltaTime, 0), 0.1)
         let rate = dt / 0.5
         weight += min(max((enabled ? 1 : 0) - weight, -rate), rate)
         guard weight > 0.001 else {
             dynamics = nil
             touching = false
+            grips = [:]
+            pull = .zero
             return
         }
         let model = solver.modelMatrices(of: pose)
@@ -408,21 +581,177 @@ public struct TailLayer: Sendable {
         // along the chord, through the legs.
         let carried = sway.follow(animated, deltaTime: dt)
         let (yaw, pitch) = sway.advance(by: dt)
-        let shape = TailSway.apply(to: carried, yaw: yaw, pitch: pitch)
+        var shape = TailSway.apply(to: carried, yaw: yaw, pitch: pitch)
+        // The tail's own lengths, before anything bends the shape it is
+        // drawn toward.
+        let carriedShape = shape
         if dynamics == nil { dynamics = ChainDynamics(shape: shape, settings: settings) }
-        dynamics!.settings = settings
-        let hands = touch ? frame.obstacles : []
-        obstacleCount = hands.count
+        var stepSettings = settings
+
+        let hands = touch ? frame.hands : []
+        updateGrips(hands: hands, deltaTime: dt)
+        // A hand holding the tail is not also pushing it away.
+        var pushing = (touch ? frame.obstacles : []) + hands.filter { grips[$0.id] == nil }.flatMap(\.spheres)
+        obstacleCount = pushing.count
+        // How each is moving, from where it was a frame ago, so a tail
+        // resting on a hand goes with the hand.
+        if pushing.count == lastObstacles.count, dt > 1e-4 {
+            for i in pushing.indices {
+                let velocity = (pushing[i].center - lastObstacles[i]) / dt
+                pushing[i].velocity = simd_length(velocity) < 6 ? velocity : .zero
+            }
+        }
+        lastObstacles = pushing.map(\.center)
+        if let answer = answer(hands: hands.filter { grips[$0.id] == nil }, shape: &shape) {
+            answering = answer
+            // Curled, it bends tighter than it carries itself.
+            if affinity > 0 {
+                stepSettings.maxBendDegrees += max(0, 100 - stepSettings.maxBendDegrees) * answer.amount
+            }
+        }
+        // A hand bends a tail further than the tail bends itself.
+        if held { stepSettings.maxBendDegrees = max(stepSettings.maxBendDegrees, 80) }
+        dynamics!.settings = stepSettings
+        dynamics!.holds = hands.compactMap { hand in
+            grips[hand.id].map { ChainDynamics.Hold(particle: $0.particle, point: hand.grip) }
+        }
         dynamics!.step(toward: shape, deltaTime: dt,
-                       floor: frame.floor.map { $0 + 0.02 * frame.sizeScale }, obstacles: hands)
+                       floor: frame.floor.map { $0 + 0.02 * frame.sizeScale }, obstacles: pushing, capsules: limbs,
+                       measuring: carriedShape)
+        slip(hands: hands, deltaTime: dt)
+        pull += (dynamics!.stretch - pull) * min(1, dt / 0.06)
         // Touching means within a whisker of a surface the chain was just
         // pushed to, so the test is against a slightly larger hand.
-        touching = !hands.isEmpty && dynamics!.touches(hands.map {
+        touching = held || (!pushing.isEmpty && dynamics!.touches(pushing.map {
             ChainDynamics.Sphere(center: $0.center, radius: $0.radius + 0.005)
-        })
+        }))
         let toModel = frame.modelToWorld.inverse
         let targets = dynamics!.positions.map { PoseSolver.translation(of: toModel * Self.translation($0)) }
         solver.lay(chain, along: targets, in: &pose, weight: weight * weight * (3 - 2 * weight))
+    }
+
+    /// Takes hold where a hand closes on the tail, and lets go where one
+    /// opens or is lost.
+    private mutating func updateGrips(hands: [BodyLayers.Hand], deltaTime: Float) {
+        let present = Set(hands.map(\.id))
+        for id in grips.keys where !present.contains(id) {
+            grips[id] = nil
+            events.append(.released(hand: id))
+        }
+        closedFor = closedFor.filter { present.contains($0.key) }
+        guard let positions = dynamics?.positions, positions.count >= 2 else { return }
+        for hand in hands {
+            let closed = hand.closure >= gripEnter
+            let before = closedFor[hand.id]
+            closedFor[hand.id] = closed ? (before ?? 0) + deltaTime : nil
+            if grips[hand.id] != nil {
+                if hand.closure < gripExit {
+                    grips[hand.id] = nil
+                    events.append(.released(hand: hand.id))
+                }
+                continue
+            }
+            // Only a hand that closes while on the tail: a fist that arrives
+            // already closed pushes it instead.
+            guard grabbable, closed, (before ?? 0) < 0.3 else { continue }
+            var best: (particle: Int, distance: Float)?
+            for i in 1..<positions.count {
+                let (closest, t) = ChainDynamics.closestPoint(on: positions[i - 1], positions[i], to: hand.grip)
+                let distance = simd_distance(closest, hand.grip)
+                // The joint nearer the contact, and never the base.
+                let particle = max(1, t < 0.5 ? i - 1 : i)
+                if distance < (best?.distance ?? .infinity) { best = (particle, distance) }
+            }
+            guard let best, best.distance < dynamics!.thickness(ofSegment: best.particle) + 0.05 else { continue }
+            grips[hand.id] = Grip(particle: best.particle)
+            events.append(.grabbed(hand: hand.id, joint: best.particle))
+        }
+    }
+
+    /// A tail pulled harder than a hand holds slides through it toward the
+    /// tip, a joint at a time, and comes free at the end.
+    private mutating func slip(hands: [BodyLayers.Hand], deltaTime: Float) {
+        guard let dynamics, !grips.isEmpty else { return }
+        let stretched = simd_length(dynamics.stretch)
+        for hand in hands {
+            guard var grip = grips[hand.id] else { continue }
+            let holds = slipStretch * min(max(hand.closure, 0.1), 1)
+            if stretched > holds {
+                grip.slipping += deltaTime
+                if grip.slipping >= slipTime {
+                    grip.slipping = 0
+                    grip.particle += 1
+                }
+            } else {
+                grip.slipping = max(0, grip.slipping - deltaTime)
+            }
+            if grip.particle >= dynamics.count {
+                grips[hand.id] = nil
+                events.append(.slipped(hand: hand.id))
+            } else {
+                grips[hand.id] = grip
+            }
+        }
+    }
+
+    /// Bends the shape the tail is drawn toward for the nearest open hand:
+    /// round it, or away from it.
+    private func answer(hands: [BodyLayers.Hand], shape: inout [SIMD3<Float>]) -> (hand: Int, amount: Float)? {
+        guard abs(affinity) > 1e-3, let dynamics, dynamics.count >= 3 else { return nil }
+        let positions = dynamics.positions
+        var nearest: (hand: BodyLayers.Hand, particle: Int, gap: Float)?
+        for hand in hands {
+            // Where the tail first comes up to the hand, counting from the
+            // body: once it is wrapped, every joint past that is as near.
+            var gaps: [(particle: Int, gap: Float)] = []
+            for i in 1..<positions.count {
+                let (closest, t) = ChainDynamics.closestPoint(on: positions[i - 1], positions[i], to: hand.grip)
+                let gap = simd_distance(closest, hand.grip) - hand.radius - dynamics.thickness(ofSegment: i)
+                gaps.append((max(1, t < 0.5 ? i - 1 : i), gap))
+            }
+            guard let least = gaps.map(\.gap).min(), least < (nearest?.gap ?? .infinity),
+                  let first = gaps.first(where: { $0.gap <= least + 0.02 }) else { continue }
+            nearest = (hand, first.particle, least)
+        }
+        guard let nearest, nearest.gap < answerRange else { return nil }
+        let amount = min(max(1 - nearest.gap / answerRange, 0), 1) * min(abs(affinity), 1)
+        let centre = nearest.hand.grip
+        if affinity < 0 {
+            // Swing the whole tail about its base, away from the hand.
+            let base = shape[0]
+            let toHand = centre - base, along = shape[shape.count - 1] - base
+            let axis = simd_cross(toHand, along)
+            guard simd_length(axis) > 1e-5 else { return (nearest.hand.id, amount) }
+            let turn = simd_quatf(angle: 45 * .pi / 180 * amount, axis: simd_normalize(axis))
+            shape = shape.map { base + turn.act($0 - base) }
+            return (nearest.hand.id, amount)
+        }
+        // Wrap what lies past the contact round the hand: a turn of a helix
+        // starting where the tail meets it.
+        let contact = nearest.particle
+        guard contact < positions.count - 1 else { return (nearest.hand.id, amount) }
+        var inward = centre - positions[contact]
+        guard simd_length(inward) > 1e-5 else { return (nearest.hand.id, amount) }
+        inward = simd_normalize(inward)
+        var tangent = positions[contact] - positions[contact - 1]
+        tangent -= inward * simd_dot(tangent, inward)
+        guard simd_length(tangent) > 1e-5 else { return (nearest.hand.id, amount) }
+        tangent = simd_normalize(tangent)
+        let axis = simd_cross(inward, tangent)
+        let radius = nearest.hand.radius + dynamics.thickness(ofSegment: contact)
+        // The spring that draws the tail to its shape gives under the
+        // tail's weight by this much. The curl is aimed that much high, so
+        // it holds against gravity: muscle, where the rest of the tail hangs.
+        let sag = SIMD3<Float>(0, settings.gravity * settings.gravityScale / max(settings.stiffness, 1e-3), 0)
+        var arc: Float = 0
+        for i in (contact + 1)..<positions.count {
+            arc += dynamics.lengths[i - 1]
+            let angle = arc / radius
+            let wrapped = centre + (tangent * sin(angle) - inward * cos(angle)) * radius
+                + axis * (2 * settings.thickness * angle / (2 * .pi)) + sag
+            shape[i] += (wrapped - shape[i]) * amount
+        }
+        return (nearest.hand.id, amount)
     }
 
     private static func translation(_ t: SIMD3<Float>) -> float4x4 {
