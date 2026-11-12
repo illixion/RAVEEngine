@@ -122,7 +122,9 @@ private func room(anchor: UUID = UUID()) -> (RAVEGuardianMap, UUID) {
                              time: t, map: map, settings: settings)
         #expect(frame.chunkOpacity.isEmpty)
         var peak: Float = 0
-        for i in 1...18 {
+        // The swing is fast enough to cue about 0.17 s in, and the wall takes
+        // a few riseTimes to light up after that: 0.3 s of swing in all.
+        for i in 1...27 {
             t += 1.0 / 90
             let elapsed = Float(i) / 90
             let x = 1.3 + 0.5 * 6 * elapsed * elapsed
