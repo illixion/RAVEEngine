@@ -34,7 +34,7 @@ and head pose. Hand input sits behind `RAVEHandInputProvider`, which returns
 |---|---|---|
 | `RAVEInput` | shipping | Hand and controller sensing, pinch/joystick/palm geometry, binding tables, tracked controllers |
 | `RAVEDiagnostics` | shipping | Frame profiler, metric collector, feed gating, HUD views |
-| `RAVERig` | shipping | Skeleton geometry, humanoid inference, FABRIK, pose solving, leg stepping, tail dynamics |
+| `RAVERig` | shipping | Skeleton geometry, humanoid inference, FABRIK, pose solving, leg stepping, tail dynamics, jiggle bones |
 | `RAVEPCVR` | planned | Only the reusable headset → PC controller-bridge *protocol*, once a second app needs it — not Longwave's PCVR feature as a whole (paywall, session limiting, CloudXR host stay Longwave-only and mostly closed-source; see this repo's CLAUDE.md). The Quest Controller Bridge protocol is a different thing and ships in `RAVEInput` |
 
 ## RAVEInput
@@ -198,6 +198,7 @@ to pose a Half-Life player model from a tracked head and hands.
 | `TailArchitecture` | Finds a tail from geometry: a weighted chain of joints leaving the pelvis backward or down, that is not a limb. |
 | `ChainDynamics` | Verlet particle chain for secondary motion — a tail, an ear, a strap — with gravity, a spring toward the animated shape, fixed lengths, a bend limit and a floor. |
 | `TailSway` | The deliberate half of a tail: a wag about the base and a carriage height, eased between styles. |
+| `JiggleBones` | Jiggle physics on a pose: the parts a character asks for (`JiggleSpec`, Codable, with presets) as point masses on damped springs, either swinging a joint about its head (breasts, ears, hair, tail chains) or shifting it (buttocks, belly). Feel given as hertz and a damping ratio; damped against the target's own motion so steady travel is not felt; substepped so the frame rate does not matter; scaled with the character's size; kept out of hand spheres. Writes turns and shifts into `JointPose`s, or reports the targets an IK host constrains instead. spatial-ai-character's `docs/jiggle-physics.md`. |
 | `BindPoseCheck` | Validates a rig before anything downstream trusts it. |
 
 ### The two halves of a solve are deliberately separate
