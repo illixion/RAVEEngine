@@ -22,9 +22,8 @@ public extension RAVESleeveArm {
     /// but ARKit still gives it an estimated pose, and that pose is good:
     /// LambdaVision draws its arms and hangs its forearm readouts on it.
     /// Dropping the elbow on those frames is what made a sleeve flicker
-    /// between two sources. Pass the arm through a `RAVESleeveArmEstimator`
-    /// all the same: it catches the estimate going wrong (a hand covering the
-    /// forearm) by its speed and length.
+    /// between two sources. Pass the arm through a `RAVESleeveArmGate` to
+    /// drop the odd reading that could not be true.
     ///
     /// Nonisolated, so a render thread can call it with an anchor predicted
     /// for the frame's presentation time.

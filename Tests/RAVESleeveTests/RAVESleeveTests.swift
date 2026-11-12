@@ -586,116 +586,60 @@ private func over(_ snapshot: RAVESleeveSnapshot, _ id: String, x: Float = 0, he
     }
 }
 
-@Suite struct RAVESleeveArmEstimatorTests {
-    let head = SIMD3<Float>(0, 1.6, 0)
-    let forward = SIMD3<Float>(0, 0, -1)
-
-    private func arm(wrist: SIMD3<Float>, elbow: SIMD3<Float>? = nil) -> RAVESleeveArm {
+@Suite struct RAVESleeveArmGateTests {
+    private func arm(wrist: SIMD3<Float>, elbow: SIMD3<Float>, normal: SIMD3<Float> = [0, -1, 0]) -> RAVESleeveArm {
         RAVESleeveArm(side: .left, wrist: wrist, elbow: elbow,
-                      palm: RAVEPalmPose(position: wrist, palmNormalOut: [0, -1, 0], fingersDirection: [1, 0, 0]))
+                      palm: RAVEPalmPose(position: wrist, palmNormalOut: normal, fingersDirection: [1, 0, 0]))
     }
 
-    @Test func theSolvedElbowKeepsBothBoneLengths() {
-        let tuning = RAVESleeveArmEstimator.Tuning()
-        let shoulder = RAVESleeveArmEstimator.shoulder(side: .left, head: head, torso: forward, tuning: tuning)
-        #expect(simd_distance(shoulder, [-0.18, 1.4, 0.06]) < 1e-5)
-        let wrist = SIMD3<Float>(0.05, 1.25, -0.3)
-        let elbow = RAVESleeveArmEstimator.elbow(shoulder: shoulder, wrist: wrist, upperArm: 0.29, forearm: 0.25,
-                                                 hint: [-0.5, -1, 0])
-        #expect(abs(simd_distance(elbow, shoulder) - 0.29) < 1e-4)
-        #expect(abs(simd_distance(elbow, wrist) - 0.25) < 1e-4)
-        // Down and out to the arm's side of the shoulder–wrist line.
-        let middle = (shoulder + wrist) / 2
-        #expect(elbow.y < middle.y)
-        #expect(elbow.x < middle.x)
-    }
-
-    @Test func aWristOutOfReachGetsAStraightArm() {
-        let shoulder = SIMD3<Float>(0, 1.4, 0)
-        let wrist = SIMD3<Float>(0, 1.4, -0.9)
-        let elbow = RAVESleeveArmEstimator.elbow(shoulder: shoulder, wrist: wrist, upperArm: 0.29, forearm: 0.25,
-                                                 hint: [0, -1, 0])
-        #expect(abs(simd_distance(elbow, wrist) - 0.25) < 0.01)
-        #expect(abs(elbow.y - 1.4) < 0.03)
-    }
-
-    @Test func withNoBoneTheElbowIsTheModels() throws {
-        var estimator = RAVESleeveArmEstimator()
-        let wrist = SIMD3<Float>(0.05, 1.25, -0.3)
-        let resolved = estimator.resolve(arm(wrist: wrist), head: head, forward: forward, now: 0)
-        let elbow = try #require(resolved.elbow)
-        #expect(abs(simd_distance(elbow, wrist) - 0.25) < 1e-3)
-        #expect(!estimator.isTrustingBone)
-    }
-
-    @Test func aFlickeringBoneIsIgnored() throws {
-        var estimator = RAVESleeveArmEstimator()
-        let wrist = SIMD3<Float>(0.05, 1.25, -0.3)
-        let model = try #require(estimator.resolve(arm(wrist: wrist), head: head, forward: forward, now: 0).elbow)
-        let bone = model + SIMD3<Float>(0.06, 0.05, 0)
-        var worst: Float = 0
-        for i in 1...180 {
-            // Tracked for a tenth of a second, lost for a tenth.
-            let tracked = (i / 9) % 2 == 0
-            let resolved = estimator.resolve(arm(wrist: wrist, elbow: tracked ? bone : nil), head: head,
-                                             forward: forward, now: Double(i) / 90)
-            worst = max(worst, simd_distance(try #require(resolved.elbow), model))
-            #expect(!estimator.isTrustingBone)
+    @Test func anOrdinaryMoveGoesStraightThrough() {
+        var gate = RAVESleeveArmGate()
+        for i in 0..<90 {
+            // 1.5 m/s, a brisk reach.
+            let wrist = SIMD3<Float>(Float(i) / 90 * 1.5, 1.2, -0.3)
+            let out = gate.filter(arm(wrist: wrist, elbow: wrist + [-0.24, 0, 0]), now: Double(i) / 90)
+            #expect(out.wrist == wrist)
+            #expect(out.elbow == wrist + [-0.24, 0, 0])
         }
-        #expect(worst < 1e-4)
+        #expect(gate.dropped == 0)
     }
 
-    @Test func aSteadyBoneIsEasedInAndBackOutWithoutAJump() throws {
-        var estimator = RAVESleeveArmEstimator()
-        let wrist = SIMD3<Float>(0.05, 1.25, -0.3)
-        let model = try #require(estimator.resolve(arm(wrist: wrist), head: head, forward: forward, now: 0).elbow)
-        let bone = model + SIMD3<Float>(0.03, 0.03, 0)
-        var last = model
-        var biggestStep: Float = 0
-        for i in 1...180 {
-            let resolved = estimator.resolve(arm(wrist: wrist, elbow: bone), head: head, forward: forward,
-                                             now: Double(i) / 90)
-            let elbow = try #require(resolved.elbow)
-            biggestStep = max(biggestStep, simd_distance(elbow, last))
-            last = elbow
-        }
-        #expect(estimator.isTrustingBone)
-        #expect(simd_distance(last, bone) < 0.004)
-        for i in 181...360 {
-            let resolved = estimator.resolve(arm(wrist: wrist), head: head, forward: forward, now: Double(i) / 90)
-            let elbow = try #require(resolved.elbow)
-            biggestStep = max(biggestStep, simd_distance(elbow, last))
-            last = elbow
-        }
-        // Back on the model, which now uses the forearm length the bone measured.
-        #expect(abs(simd_distance(last, wrist) - estimator.forearmLength) < 0.004)
-        #expect(biggestStep < 0.003)   // eased both ways: never a jump
+    @Test func aSpikeIsDroppedAndTheLastReadingStands() {
+        var gate = RAVESleeveArmGate()
+        let wrist = SIMD3<Float>(0, 1.2, -0.3), elbow = SIMD3<Float>(-0.24, 1.2, -0.3)
+        gate.filter(arm(wrist: wrist, elbow: elbow), now: 0)
+        // One frame of tracking loss: the elbow 30 cm away, the palm flipped.
+        let spiked = gate.filter(arm(wrist: wrist, elbow: elbow + [0, 0.3, 0], normal: [0, 1, 0]), now: 1.0 / 90)
+        #expect(spiked.elbow == elbow)
+        #expect(spiked.palm.palmNormalOut == [0, -1, 0])
+        #expect(gate.dropped == 2)
+        // Back where it was: accepted as if nothing happened.
+        let after = gate.filter(arm(wrist: wrist, elbow: elbow), now: 2.0 / 90)
+        #expect(after.elbow == elbow)
+        #expect(gate.dropped == 2)
     }
 
-    @Test func aBoneRacingAgainstTheWristIsNoise() throws {
-        var estimator = RAVESleeveArmEstimator()
-        let wrist = SIMD3<Float>(0.05, 1.25, -0.3)
-        let model = try #require(estimator.resolve(arm(wrist: wrist), head: head, forward: forward, now: 0).elbow)
-        for i in 1...180 {
-            // 6 cm of wander each frame, as under a covering hand.
-            let wander = SIMD3<Float>(i % 2 == 0 ? 0.03 : -0.03, 0, 0)
-            let resolved = estimator.resolve(arm(wrist: wrist, elbow: model + wander), head: head, forward: forward,
-                                             now: Double(i) / 90)
-            #expect(simd_distance(try #require(resolved.elbow), model) < 1e-4)
+    @Test func anArmThatReallyMovedIsBelievedOnceItCouldHaveGotThere() {
+        var gate = RAVESleeveArmGate()
+        let wrist = SIMD3<Float>(0, 1.2, -0.3)
+        gate.filter(arm(wrist: wrist, elbow: wrist + [-0.24, 0, 0]), now: 0)
+        // The wrist is now 30 cm away and stays there: within reach at 6 m/s after 50 ms.
+        let moved = wrist + SIMD3<Float>(0.3, 0, 0)
+        var acceptedAt: Double?
+        for i in 1...30 {
+            let now = Double(i) / 90
+            let out = gate.filter(arm(wrist: moved, elbow: moved + [-0.24, 0, 0]), now: now)
+            if out.wrist == moved, acceptedAt == nil { acceptedAt = now }
         }
-        #expect(!estimator.isTrustingBone)
+        #expect(acceptedAt.map { $0 > 0.03 && $0 < 0.08 } == true)
     }
 
-    @Test func aGlanceDoesNotTurnTheShoulders() throws {
-        var estimator = RAVESleeveArmEstimator()
-        let wrist = SIMD3<Float>(0.05, 1.25, -0.3)
-        let before = try #require(estimator.resolve(arm(wrist: wrist), head: head, forward: forward, now: 0).elbow)
-        // The head turns 60° for a tenth of a second.
-        var after = before
-        for i in 1...9 {
-            after = try #require(estimator.resolve(arm(wrist: wrist), head: head, forward: [0.87, 0, -0.5],
-                                                   now: Double(i) / 90).elbow)
-        }
-        #expect(simd_distance(after, before) < 0.03)
+    @Test func aGapStartsAfresh() {
+        var gate = RAVESleeveArmGate()
+        let wrist = SIMD3<Float>(0, 1.2, -0.3)
+        gate.filter(arm(wrist: wrist, elbow: wrist + [-0.24, 0, 0]), now: 0)
+        let far = SIMD3<Float>(1, 1, 1)
+        #expect(gate.filter(arm(wrist: far, elbow: far + [-0.24, 0, 0]), now: 1).wrist == far)
+        #expect(gate.dropped == 0)
     }
 }

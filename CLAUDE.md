@@ -57,7 +57,7 @@ sits behind `RAVEHandInputProvider`, which returns `RAVENoHandInput` off-visionO
 | `RAVERig` | Skeleton geometry, humanoid inference, FABRIK, pose solving, leg stepping, a tracked performer driving a humanoid (`PerformerRig`, head + hands, mirrored or not, or placed as the performer's own body so its hands land on theirs, legs folded when they sit, legs walking from a `PerformerLowerBody`), and that lower body made up from the head (`PerformerGait`: steps in time with the head's bob; its pelvis and feet are tracker poses, meant for Longwave's PC VR too), and that lower body measured (`TrackedLegs`: planted feet pinned, gaps held, faded against the gait with `PerformerLowerBody.mix`) — shipping, see README |
 | `RAVEHolo` | In-world holographic UI for Metal hosts: SDF glyph atlas (CoreText, no font shipped), panel/gauge/text scene, Metal 4 renderer drawing into a pass the host owns. Shader source compiles at runtime (SwiftPM's CLI builds no `.metal`); `RAVEHOLO_SNAPSHOT=/x.png swift test --filter RAVEHolo` renders a sample panel to look at. Renderer is `@available(macOS 26)` (Metal 4) without raising the package floor. Also interactive: pinchable targets (Compositor Services tracking areas + a CPU ray hit-test), widgets/stack layout, and a palm anchor (`RAVEHoloPalmAnchor`, an alias of RAVEInput's `RAVEPalmAnchor`, shared with `RAVEPanel`) — see "RAVEHolo: interactive panels". Depends on `RAVEInput` for the anchor only. Consumers: LambdaVision (HEV HUD + developer palm debug panel), Oneiros (Metal-host wrist HUD) |
 | `RAVEPanel` | Any SwiftUI view as a panel in a RealityKit scene: chrome, the attachment hosting fix, world / palm / head-follow placing, and a visibility verdict to pause content by; also draws a `RAVESleeve` (`RAVESleevePanels`, `RAVESleeveHost`). Rules host-tested, entity half visionOS-only. Depends on `RAVEInput` for the palm anchor and on `RAVESleeve`. See "About `RAVEPanel`". Consumers: spatial-ai-character, Longwave |
-| `RAVESleeve` | A HUD worn on the forearm, replacing the palm-anchored panels: `RAVESleeveFrame` (the arm as a coordinate system, from the hand skeleton's `forearmWrist` / `forearmArm` joints), `RAVESleeveFollower` (one-euro filter: on the arm in motion, still at rest), `RAVESleeveLayout` (Codable pages of tiles on the outer and inner face: label, gauge, button, toggle, hold, slider, page, radial, dock, custom), `RAVESleeve` (faces that show as the arm turns, flat tile placement, presses from gaze + pinch and from a fingertip coming down through a tile, events), `RAVESleeveRadial` (a radial menu travel, a stick, gaze and touch all drive), docked panels, `RAVESleevePresets.mediaRemote`. Foundation + simd, host-tested, draws nothing. Depends on `RAVEInput`. See "About `RAVESleeve`". Consumers: none yet (planned: every app with an immersive space) |
+| `RAVESleeve` | A HUD worn on the forearm, replacing the palm-anchored panels: `RAVESleeveFrame` (the arm as a coordinate system, from the hand skeleton's `forearmWrist` / `forearmArm` joints), `RAVESleeveArmGate` (drops readings that could not be true), `RAVESleeveFollower` (one-euro filter: on the arm in motion, still at rest), `RAVESleeveLayout` (Codable pages of tiles on the outer and inner face: label, gauge, button, toggle, hold, slider, page, radial, dock, custom), `RAVESleeve` (faces that show as the arm turns, flat tile placement, presses from gaze + pinch and from a fingertip coming down through a tile, events), `RAVESleeveRadial` (a radial menu travel, a stick, gaze and touch all drive), docked panels, `RAVESleevePresets.mediaRemote`. Foundation + simd, host-tested, draws nothing. Depends on `RAVEInput`. See "About `RAVESleeve`". Consumers: none yet (planned: every app with an immersive space) |
 | `RAVESharedSpace` | Several apps in one immersive space as modules of one process: `RAVESpaceModule` (what an app implements: content under a root the host gives it), `RAVESpaceBroker` (open while anyone wants it), `RAVESpacePolicy` (the space's one immersion style, arm visibility and surroundings, from all members), `RAVESpatialServices` (one ARKit session), `RAVESpaceHost`/`RAVESpaceView` (per-module roots, taps routed to their module). Policy and broker host-tested. Consumers: Nexus, and spatial-ai-character as its module. See "About `RAVESharedSpace`" |
 | `RAVEModuleBus` | The channel between modules that share a process: typed context feeds a module publishes (`RAVEFeedKey`, rate-limited, rolling window, privacy label), actions it offers (`RAVEBusAction`, validated before they run), and the shared media vocabulary (`RAVEMediaFeeds`, `RAVEMediaControlling`, `RAVEMediaDigest`) so a companion can watch along without importing the player, and the chat vocabulary (`RAVEChatFeeds`, `RAVEChatSending`, `RAVEChatDigest`) so it can read a live chat without knowing the site. Foundation + simd only, host-tested. Consumers: Nexus (planned: Hypnos as publisher, spatial-ai-character as reader). See "About `RAVEModuleBus`" |
 | `RAVEFoveatedGaze` | Where the wearer looks, through Apple's FoveatedStreaming (visionOS 27): `RAVEFoveatedGazeFeed` (one feed protocol), `RAVEFoveatedProviderFeed` + `RAVEFoveatedGazeReceiver` (host side of the official route), `RAVEGazeOnlyStreamingProvider` (a whole gaze-only provider extension, subclassed in one line; needs the `foveated-streaming-provider` entitlement), and `RAVEFoveatedGazeFeeds.plugin()` (a feed an app links in from outside its repo, found by the Objective-C name `RAVEFoveatedGazePlugin`). All under `os(visionOS) && canImport(FoveatedStreaming)`, so it builds empty on macOS, iOS and the simulator; its own target so other RAVEInput consumers never link FoveatedStreaming. Samples travel as `RAVEGazeWire` bytes (RAVEInput, host-tested). Extension target template: `Templates/FoveatedGazeProvider/`. Consumers: spatial-ai-character, Longwave |
@@ -200,15 +200,30 @@ snapshot (`RAVESleeveSnapshot`: placed tiles with a transform, size, state, pres
 the whole contract between the rules and a renderer. Tile `target` values are stable for a
 layout, for Compositor Services tracking areas.
 
-Unmeasured, and to be measured on a headset before the migrations (the tuning defaults are
-estimates until then):
-- jitter and latency of the two forearm joints, and whether `forearmArm` is tracked often
-  enough (without it the frame is estimated from the hand and says so);
-- whether hand tracking survives one hand covering the other forearm, which direct touch
-  depends on (`Tuning.touchDropout` bridges short losses);
-- the stereo depth conflict of tiles 12 mm off the real arm (LambdaVision's HEV readouts sit
-  8 cm off for this reason);
-- the roll: it is the wrist's for the whole sleeve unless the host passes `elbowBack`.
+What wearing it on a Vision Pro settled (2026-11-12, spatial-ai-character's stream sleeve; the
+defaults in `RAVESleeve.Tuning` and `RAVESleeveMetrics` are still estimates):
+- **Use the tracked forearm bone, positions only.** `forearmArm`'s own `isTracked` is false on
+  about two frames in three with the arm held up, but its estimated pose is good (LambdaVision
+  relies on it), so the anchor's tracking is the only gate. A body-model guess of the elbow
+  (shoulder from the head, two-bone solve) was tried and removed: on a wireframe the bone held
+  still while the guess wandered. Build the frame from the wrist and elbow *positions*, never a
+  joint's orientation: tiles fixed in the wrist joint's frame shook with its orientation noise.
+- **`RAVESleeveArmGate` drops readings that could not be true** (a spike of tracking loss)
+  before the follower smooths.
+- **Pose the tiles through RealityKit's anchor for the wrist joint** (`RAVESleeveHost.update`'s
+  `anchorFrame`): posed from ARKit in the app alone they trail the arm by frames, enough for a
+  rising arm to cover its own sleeve. The sleeve still runs in the world; each tile is given its
+  place relative to the joint as the app last read it. RealityKit's frame for the joint is
+  ARKit's turned half way about its x axis on a left arm; a right arm is unchecked.
+- **ARKit's arm shakes at the source**, more in poor light and dark sleeves, and more with the
+  other hand over the forearm. The app steadies the sleeve by degrees (never a snap freeze, the
+  owner's call): more as the other hand nears and while the arm rests, by lowering the
+  follower's cut-off, and off the anchor once well steadied. That logic is still in the app
+  (`StreamSleeve.tick`), tuned through DebugTunables; move it here once the numbers settle.
+- **Tiles are plain fills, not materials**, and unchanged tiles are not re-sent to the renderer.
+- Open: a line of blocks eating the tiles when the headset is hot, and the tiles fading where
+  visionOS judges the arm to be in front. `upperLimbVisibility(.hidden)` did not stop either.
+  Finger presses have not been seen to register yet; gaze and pinch has.
 
 Hand tracking exists only inside an immersive space, so a windowed app wears a sleeve only as a
 module of a shared space (Nexus).
