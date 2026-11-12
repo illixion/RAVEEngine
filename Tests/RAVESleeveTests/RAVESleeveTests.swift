@@ -643,3 +643,72 @@ private func over(_ snapshot: RAVESleeveSnapshot, _ id: String, x: Float = 0, he
         #expect(gate.dropped == 0)
     }
 }
+
+@Suite struct RAVESleeveSteadierTests {
+    let frame = RAVESleeveFrame(side: .left, origin: [0, 1.2, -0.3], along: [-1, 0, 0], back: [0, 1, 0],
+                                length: 0.24)
+
+    /// Runs for `seconds` at 90 Hz with the wrist where `wrist` says.
+    private func run(_ steadier: inout RAVESleeveSteadier, from start: Double, seconds: Double,
+                     otherHand: [SIMD3<Float>] = [], wrist: (Double) -> SIMD3<Float>) {
+        var t = start
+        while t < start + seconds {
+            steadier.update(frame: frame, otherHand: otherHand, wrist: wrist(t), now: t)
+            t += 1.0 / 90
+        }
+    }
+
+    @Test func aMovingArmWithNoHandNearIsNotSteadied() {
+        var steadier = RAVESleeveSteadier()
+        run(&steadier, from: 0, seconds: 1) { [0.5 * Float($0), 1.2, -0.3] }   // 0.5 m/s
+        #expect(steadier.calm < 0.05)
+        #expect(!steadier.isOffAnchor)
+    }
+
+    @Test func aRestingArmIsPartlySteadiedThroughItsJitter() {
+        var steadier = RAVESleeveSteadier()
+        run(&steadier, from: 0, seconds: 2) { t in
+            [Int(t * 90) % 2 == 0 ? 0.002 : -0.002, 1.2, -0.3]   // 2 mm of tracking jitter
+        }
+        #expect(abs(steadier.calm - 0.7) < 0.03)
+    }
+
+    @Test func calmGrowsAsTheOtherHandComesNearer() {
+        var levels: [Float] = []
+        for distance: Float in [0.4, 0.25, 0.15, 0.05] {
+            var steadier = RAVESleeveSteadier()
+            steadier.tuning.atRest = 0
+            run(&steadier, from: 0, seconds: 2, otherHand: [[-0.08, 1.2 + distance, -0.3]]) { _ in [0, 1.2, -0.3] }
+            levels.append(steadier.calm)
+        }
+        #expect(levels[0] == 0)
+        #expect(levels[1] > 0.02 && levels[1] < levels[2])
+        #expect(levels[2] < levels[3])
+        #expect(levels[3] > 0.99)
+    }
+
+    @Test func calmComesOnSmoothlyAndLeavesFaster() {
+        var steadier = RAVESleeveSteadier()
+        steadier.tuning.atRest = 0
+        let hand: [SIMD3<Float>] = [[-0.08, 1.23, -0.3]]
+        steadier.update(frame: frame, otherHand: hand, wrist: [0, 1.2, -0.3], now: 0)
+        steadier.update(frame: frame, otherHand: hand, wrist: [0, 1.2, -0.3], now: 1.0 / 90)
+        #expect(steadier.calm < 0.1)                      // no snap
+        run(&steadier, from: 2.0 / 90, seconds: 1.5, otherHand: hand) { _ in [0, 1.2, -0.3] }
+        #expect(steadier.calm > 0.99 && steadier.isOffAnchor)
+        run(&steadier, from: 2, seconds: 0.3) { _ in [0, 1.2, -0.3] }
+        #expect(steadier.calm < 0.06)
+        #expect(!steadier.isOffAnchor)
+    }
+
+    @Test func theFilterSlowsWithCalm() {
+        var steadier = RAVESleeveSteadier()
+        let ordinary = RAVEOneEuroFilter.Tuning(minCutoff: 4, beta: 150)
+        #expect(steadier.tuned(ordinary, calmGain: 15) == ordinary)
+        steadier.tuning.atRest = 0
+        run(&steadier, from: 0, seconds: 2, otherHand: [[-0.08, 1.23, -0.3]]) { _ in [0, 1.2, -0.3] }
+        let calmed = steadier.tuned(ordinary, calmGain: 15)
+        #expect(abs(calmed.minCutoff - 0.4) < 0.05)
+        #expect(abs(calmed.beta - 15) < 2)
+    }
+}
