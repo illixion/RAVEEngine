@@ -95,15 +95,18 @@ private func room(anchor: UUID = UUID()) -> (RAVEGuardianMap, UUID) {
         #expect(frame.peakAlert == 0)
         #expect(frame.chunkOpacity.isEmpty)
 
-        // The same spot reached at 2.5 m/s toward the wall: warned.
+        // The same spot reached with a fast accelerating swing: warned.
         var fast = RAVEGuardianMonitor()
+        var peakAlert: Float = 0
         for i in 0..<30 {
-            let x: Float = 0.4 + Float(i) / 90 * 2.5
+            let elapsed = Float(i) / 90
+            let x: Float = 0.4 + 0.5 * 12 * elapsed * elapsed
             frame = fast.update(probes: [.init(id: "hand", kind: .hand, position: [min(x, 1.1), 1.2, 0])],
                                 time: Double(i) / 90, map: map, settings: settings)
+            peakAlert = max(peakAlert, frame.peakAlert)
             if x >= 1.1 { break }
         }
-        #expect(frame.peakAlert > 0.9)
+        #expect(peakAlert > 0.9)
         let state = try! #require(frame.probes.first)
         #expect(state.approachSpeed > 1.5)
         // Only the wall the hand is heading for lights up, not the far one.
@@ -115,9 +118,18 @@ private func room(anchor: UUID = UUID()) -> (RAVEGuardianMap, UUID) {
         let (map, _) = room()
         var m = RAVEGuardianMonitor()
         var t = 0.0
-        var frame = m.update(probes: [.init(id: "h", kind: .hand, position: [1.9, 1.2, 0])], time: t, map: map, settings: settings)
-        #expect(frame.peakAlert == 1)
-        let peak = frame.chunkOpacity.values.max() ?? 0
+        var frame = m.update(probes: [.init(id: "h", kind: .hand, position: [1.3, 1.2, 0])],
+                             time: t, map: map, settings: settings)
+        #expect(frame.chunkOpacity.isEmpty)
+        var peak: Float = 0
+        for i in 1...18 {
+            t += 1.0 / 90
+            let elapsed = Float(i) / 90
+            let x = 1.3 + 0.5 * 6 * elapsed * elapsed
+            frame = m.update(probes: [.init(id: "h", kind: .hand, position: [x, 1.2, 0])],
+                             time: t, map: map, settings: settings)
+            peak = max(peak, frame.chunkOpacity.values.max() ?? 0)
+        }
         #expect(peak > 0.8)
         for _ in 0..<10 {
             t += 1.0 / 90
@@ -132,19 +144,18 @@ private func room(anchor: UUID = UUID()) -> (RAVEGuardianMap, UUID) {
         #expect(frame.chunkOpacity.isEmpty)
     }
 
-    @Test func alwaysModeShowsNearbyWallsAtRest() {
+    @Test func legacyContinuousModeDoesNotShowWallsAtRest() {
         let (map, _) = room()
         var s = settings
         s.visibility = .always
         var m = RAVEGuardianMonitor()
         var frame = RAVEGuardianFrame()
         for i in 0..<120 {
-            frame = m.update(probes: [.init(id: "head", kind: .head, position: [0, 1.6, 0])],
+            frame = m.update(probes: [.init(id: "hand", kind: .hand, position: [1.95, 1.6, 0])],
                              time: Double(i) / 90, map: map, settings: s)
         }
         #expect(frame.peakAlert == 0)
-        #expect(!frame.chunkOpacity.isEmpty)
-        for v in frame.chunkOpacity.values { #expect(abs(v - s.appearance.restingOpacity) < 0.02) }
+        #expect(frame.chunkOpacity.isEmpty)
     }
 
     @Test func disabledOrUnwatchedDrawsNothing() {

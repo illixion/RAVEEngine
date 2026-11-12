@@ -22,26 +22,38 @@ public struct RAVEGuardianSettingsControls: View {
     public var body: some View {
         Toggle("Guardian", isOn: $store.settings.isEnabled)
         if store.settings.isEnabled {
-            Picker("Show outline", selection: $store.settings.visibility) {
-                ForEach(RAVEGuardianSettings.Visibility.allCases) { Text($0.title).tag($0) }
-            }
-            .pickerStyle(.segmented)
+            Text("Wall cues appear briefly when a hand or controller accelerates toward a wall.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
             slider("Safety margin", value: $store.settings.warningDistance,
                    in: RAVEGuardianSettings.warningDistanceRange, step: 0.05) {
                 "\(Int(($0 * 100).rounded())) cm"
             }
-            slider("Early warning for fast moves", value: $store.settings.lookahead,
+            slider("Minimum approach speed", value: $store.settings.minimumApproachSpeed,
+                   in: RAVEGuardianSettings.approachSpeedRange, step: 0.05) {
+                String(format: "%.2f m/s", $0)
+            }
+            slider("Minimum acceleration", value: $store.settings.minimumApproachAcceleration,
+                   in: RAVEGuardianSettings.approachAccelerationRange, step: 0.25) {
+                String(format: "%.1f m/s²", $0)
+            }
+            slider("Prediction time", value: $store.settings.lookahead,
                    in: RAVEGuardianSettings.lookaheadRange, step: 0.05) {
                 $0 == 0 ? "Off" : String(format: "%.2f s ahead", $0)
             }
 
-            Toggle("Watch my head", isOn: $store.settings.watchesHead)
             Toggle("Watch my hands", isOn: $store.settings.watchesHands)
             if offersControllers {
                 Toggle("Watch controllers", isOn: $store.settings.watchesControllers)
             }
-            Toggle("Include furniture", isOn: $store.settings.includesFurniture)
+            Toggle("Show nearby furniture holograms", isOn: $store.settings.includesFurniture)
+            if store.settings.includesFurniture {
+                slider("Hologram brightness", value: $store.settings.appearance.obstacleOpacity,
+                       in: 0.05...0.8, step: 0.05) {
+                    "\(Int(($0 * 100).rounded()))%"
+                }
+            }
 
             Picker("Style", selection: $store.settings.appearance.style) {
                 ForEach(RAVEGuardianSettings.Style.allCases) { Text($0.title).tag($0) }
@@ -58,12 +70,6 @@ public struct RAVEGuardianSettingsControls: View {
             }
             slider("Brightness", value: $store.settings.appearance.maxOpacity, in: 0.1...1, step: 0.05) {
                 "\(Int(($0 * 100).rounded()))%"
-            }
-            if store.settings.visibility == .always {
-                slider("Resting brightness", value: $store.settings.appearance.restingOpacity,
-                       in: 0.02...0.6, step: 0.02) {
-                    "\(Int(($0 * 100).rounded()))%"
-                }
             }
             Button("Reset guardian to defaults") { store.resetToDefaults() }
         }

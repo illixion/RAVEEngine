@@ -107,16 +107,16 @@ public final class RAVEGuardianMetalRenderer: @unchecked Sendable {
         if self.device !== device { reset(device) }
 
         // Geometry for the chunks that show, rebuilt when their mesh changed.
-        var draws: [(buffer: ChunkBuffer, opacity: Float)] = []
+        var draws: [(buffer: ChunkBuffer, opacity: Float, isObstacle: Bool)] = []
         for (id, opacity) in snapshot.opacity where opacity > 0.002 {
             guard let chunk = snapshot.map.chunks[id], let revision = snapshot.map.chunkRevisions[id] else { continue }
             if let cached = buffers[id], cached.revision == revision {
-                draws.append((cached, opacity))
+                draws.append((cached, opacity, id.isObstacle))
                 continue
             }
             guard let built = Self.makeBuffer(device: device, chunk: chunk, revision: revision) else { continue }
             buffers[id] = built
-            draws.append((built, opacity))
+            draws.append((built, opacity, id.isObstacle))
         }
         // Forget buffers for chunks that are gone.
         if buffers.count > snapshot.map.chunks.count {
@@ -125,9 +125,6 @@ public final class RAVEGuardianMetalRenderer: @unchecked Sendable {
         guard !draws.isEmpty else { return }
 
         let a = snapshot.appearance
-        let base = SIMD3(Self.linear(a.color.red), Self.linear(a.color.green), Self.linear(a.color.blue))
-        let style: Int32 = switch a.style { case .grid: 0; case .lines: 1; case .solid: 2 }
-
         for target in targets {
             guard let pipeline = pipeline(for: target.colorTexture.pixelFormat) else { continue }
             let pass = MTLRenderPassDescriptor()
@@ -142,6 +139,18 @@ public final class RAVEGuardianMetalRenderer: @unchecked Sendable {
             encoder.setCullMode(.none)
             encoder.setViewport(target.viewport)
             for draw in draws {
+                let color = draw.isObstacle ? a.obstacleColor : a.color
+                let base = SIMD3(Self.linear(color.red), Self.linear(color.green), Self.linear(color.blue))
+                let style: Int32
+                if draw.isObstacle {
+                    style = 2
+                } else {
+                    style = switch a.style {
+                    case .grid: 0
+                    case .lines: 1
+                    case .solid: 2
+                    }
+                }
                 var uniforms = Uniforms(viewProjection: target.viewProjection,
                                         color: SIMD4(base, draw.opacity),
                                         spacing: a.spacing, lineWidth: a.lineWidth, style: style)

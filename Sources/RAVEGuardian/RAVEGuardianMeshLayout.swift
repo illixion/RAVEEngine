@@ -1,14 +1,8 @@
 /*
- RAVE Engine — a chunk's triangles laid out for drawing: un-shared vertices
- pushed a little into the room, with texture coordinates projected from world
- space so the grid lies flat and continuous along each real wall.
-
- The projection: a near-vertical face is unrolled along the horizontal
- tangent of its normal (u) and world height (v); a near-horizontal face
- (a table top, with furniture on) uses world x/z. Coplanar faces share a
- tangent, so a flat wall's grid lines run straight across all its triangles.
- The coordinates are in units of grid cells (metres / spacing) and the
- texture repeats, so the line spacing is set here, not in the texture.
+ RAVE Engine — draw walls as locally fitted planes instead of tracing every
+ noisy mesh triangle. Boundary triangles with matching normals and offsets
+ share one fitted plane, so their grid lines remain straight across the wall
+ patch. Obstacles keep their reconstructed shape for the hologram pass.
  */
 
 import Foundation
@@ -33,26 +27,86 @@ public struct RAVEGuardianMeshLayout: Sendable, Equatable {
         uvs.reserveCapacity(triangles.count * 3)
         normals.reserveCapacity(triangles.count * 3)
         indices.reserveCapacity(triangles.count * 3)
-        for t in triangles {
-            let n = t.normal
-            let project: (SIMD3<Float>) -> SIMD2<Float>
-            let horizontal = SIMD3<Float>(n.x, 0, n.z)
+        struct PlaneGroup {
+            var normalSum: SIMD3<Float>
+            var weightedCentroid: SIMD3<Float>
+            var weight: Float
+            var triangleIndices: [Int]
+
+            var normal: SIMD3<Float> { simd_normalize(normalSum) }
+            var centroid: SIMD3<Float> { weightedCentroid / weight }
+        }
+
+        var planes: [PlaneGroup] = []
+        let parallelDot = cos(Float.pi / 6) // 30 degrees of reconstructed normal noise
+        let planeTolerance: Float = 0.3
+        for (index, triangle) in triangles.enumerated() where triangle.surface.isBoundary {
+            let h = SIMD3<Float>(triangle.normal.x, 0, triangle.normal.z)
+            guard simd_length(h) > 0.3 else { continue }
+            let normal = simd_normalize(h)
+            let area = simd_length(simd_cross(triangle.b - triangle.a,
+                                              triangle.c - triangle.a)) * 0.5
+            guard area > 1e-6 else { continue }
+            let centroid = triangle.centroid
+            if let group = planes.indices.first(where: {
+                let plane = planes[$0]
+                return simd_dot(plane.normal, normal) >= parallelDot
+                    && abs(simd_dot(plane.normal, centroid - plane.centroid)) <= planeTolerance
+            }) {
+                planes[group].normalSum += normal * area
+                planes[group].weightedCentroid += centroid * area
+                planes[group].weight += area
+                planes[group].triangleIndices.append(index)
+            } else {
+                planes.append(PlaneGroup(normalSum: normal * area,
+                                         weightedCentroid: centroid * area,
+                                         weight: area, triangleIndices: [index]))
+            }
+        }
+
+        for plane in planes {
+            let normal = plane.normal
+            let offset = simd_dot(normal, plane.centroid)
+            // Tangent along the wall: up × normal. Coordinates are absolute
+            // world metres, so separate mesh chunks keep the same grid phase.
+            let tangent = SIMD3<Float>(normal.z, 0, -normal.x)
+            for index in plane.triangleIndices {
+                let t = triangles[index]
+                let flattened = [t.a, t.b, t.c].map { point in
+                    point - normal * (simd_dot(normal, point) - offset)
+                }
+                append(flattened, normal: normal, spacing: s) { point in
+                    SIMD2(simd_dot(point, tangent), point.y) / s
+                }
+            }
+        }
+
+        for triangle in triangles where !triangle.surface.isBoundary {
+            let normal = triangle.normal
+            let horizontal = SIMD3<Float>(normal.x, 0, normal.z)
             if simd_length(horizontal) > 0.3 {
                 let h = simd_normalize(horizontal)
-                // Tangent along the wall: up × normal.
                 let tangent = SIMD3<Float>(h.z, 0, -h.x)
-                project = { p in SIMD2(simd_dot(p, tangent), p.y) / s }
+                append([triangle.a, triangle.b, triangle.c], normal: normal, spacing: s) { point in
+                    SIMD2(simd_dot(point, tangent), point.y) / s
+                }
             } else {
-                project = { p in SIMD2(p.x, p.z) / s }
+                append([triangle.a, triangle.b, triangle.c], normal: normal, spacing: s) { point in
+                    SIMD2(point.x, point.z) / s
+                }
             }
-            let base = UInt32(positions.count)
-            for p in [t.a, t.b, t.c] {
-                positions.append(p + n * Self.surfaceOffset)
-                normals.append(n)
-                uvs.append(project(p))
-            }
-            indices.append(contentsOf: [base, base + 1, base + 2])
         }
+    }
+
+    private mutating func append(_ points: [SIMD3<Float>], normal: SIMD3<Float>,
+                                 spacing: Float, project: (SIMD3<Float>) -> SIMD2<Float>) {
+        let base = UInt32(positions.count)
+        for point in points {
+            positions.append(point + normal * Self.surfaceOffset)
+            normals.append(normal)
+            uvs.append(project(point))
+        }
+        indices.append(contentsOf: [base, base + 1, base + 2])
     }
 }
 

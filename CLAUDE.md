@@ -60,7 +60,7 @@ sits behind `RAVEHandInputProvider`, which returns `RAVENoHandInput` off-visionO
 | `RAVESharedSpace` | Several apps in one immersive space as modules of one process: `RAVESpaceModule` (what an app implements: content under a root the host gives it), `RAVESpaceBroker` (open while anyone wants it), `RAVESpacePolicy` (the space's one immersion style, arm visibility and surroundings, from all members), `RAVESpatialServices` (one ARKit session), `RAVESpaceHost`/`RAVESpaceView` (per-module roots, taps routed to their module). Policy and broker host-tested. Consumers: Nexus, and spatial-ai-character as its module. See "About `RAVESharedSpace`" |
 | `RAVEModuleBus` | The channel between modules that share a process: typed context feeds a module publishes (`RAVEFeedKey`, rate-limited, rolling window, privacy label), actions it offers (`RAVEBusAction`, validated before they run), and the shared media vocabulary (`RAVEMediaFeeds`, `RAVEMediaControlling`, `RAVEMediaDigest`) so a companion can watch along without importing the player, and the chat vocabulary (`RAVEChatFeeds`, `RAVEChatSending`, `RAVEChatDigest`) so it can read a live chat without knowing the site. Foundation + simd only, host-tested. Consumers: Nexus (planned: Hypnos as publisher, spatial-ai-character as reader). See "About `RAVEModuleBus`" |
 | `RAVEFoveatedGaze` | Where the wearer looks, through Apple's FoveatedStreaming (visionOS 27): `RAVEFoveatedGazeFeed` (one feed protocol), `RAVEFoveatedProviderFeed` + `RAVEFoveatedGazeReceiver` (host side of the official route), `RAVEGazeOnlyStreamingProvider` (a whole gaze-only provider extension, subclassed in one line; needs the `foveated-streaming-provider` entitlement), and `RAVEFoveatedGazeFeeds.plugin()` (a feed an app links in from outside its repo, found by the Objective-C name `RAVEFoveatedGazePlugin`). All under `os(visionOS) && canImport(FoveatedStreaming)`, so it builds empty on macOS, iOS and the simulator; its own target so other RAVEInput consumers never link FoveatedStreaming. Samples travel as `RAVEGazeWire` bytes (RAVEInput, host-tested). Extension target template: `Templates/FoveatedGazeProvider/`. Consumers: spatial-ai-character, Longwave |
-| `RAVEGuardian` | A Guardian-style room boundary from visionOS's world mesh: walls, doors and windows (furniture optional) drawn as a tinted world-aligned grid wherever the head, a hand or a controller is near one or heading for one fast. `RAVEGuardianMap` (barrier triangles in 1 m chunks per mesh anchor), `RAVEGuardianMonitor` (velocity, proximity + time-to-contact alert, per-chunk fade), `RAVEGuardianMeshLayout`/`RAVEGuardianPattern`, `RAVEGuardianSettings` + store (on by default), `RAVEGuardianSettingsControls` and `RAVEGuardianMetalRenderer` (the Metal drawing for Compositor Services hosts) are host-tested; `RAVEGuardian` (RealityKit root ticked by a System), `RAVEGuardianOverlay` (the same rules for Metal hosts), `RAVEGuardianMeshExtraction`, `RAVEGuardianProbe.head/hand` and `RAVEGuardianWorldSensor` (its own scene reconstruction) are visionOS-only. See "About `RAVEGuardian`". Consumers: Longwave (PCVR space), spatial-ai-character |
+| `RAVEGuardian` | A Guardian-style room boundary from visionOS's world mesh: fitted-plane grids on walls, doors and windows appear briefly when a hand or controller accelerates toward one; nearby furniture can appear as a translucent hologram. The headset is left to visionOS's own protection. `RAVEGuardianMap` (barrier triangles in 1 m chunks per mesh anchor), `RAVEGuardianMonitor` (smoothed acceleration, rate-limited cues, furniture proximity and per-chunk fade), `RAVEGuardianMeshLayout`/`RAVEGuardianPattern`, `RAVEGuardianSettings` + store (on by default), `RAVEGuardianSettingsControls` and `RAVEGuardianMetalRenderer` (the Metal drawing for Compositor Services hosts) are host-tested; `RAVEGuardian` (RealityKit root ticked by a System), `RAVEGuardianOverlay` (the same rules for Metal hosts), `RAVEGuardianMeshExtraction`, `RAVEGuardianProbe.head/hand` and `RAVEGuardianWorldSensor` (its own scene reconstruction) are visionOS-only. See "About `RAVEGuardian`". Consumers: Longwave (PCVR space), spatial-ai-character |
 | `RAVEPCVR` | Planned — see "About the planned RAVEPCVR target" below before touching this |
 
 **"XR/game-shaped" is the real scope, not the acronym.** Robot-Assisted Vision Enhancements
@@ -229,18 +229,24 @@ invisible) and spatial-ai-character (which already streams the classified mesh).
 Meta Guardian idea on the data visionOS gives an app: `SceneReconstructionProvider`'s
 classified `MeshAnchor`s, not a drawn boundary.
 
-- **Barriers** are faces classed wall/door/window that stand within ~45° of vertical
-  (`|n.y| < 0.7`), plus, with "Include furniture", every other non-floor, non-ceiling class
-  whose top is ≥ 15 cm above the floor. Normals are oriented into the room from the mesh's
-  own vertex normals, and the drawn outline sits 1.5 cm in front of the surface.
-- **The alert** (`RAVEGuardianMonitor.alert`): the larger of proximity (0 at the safety
-  margin, 1 at a quarter of it) and approach (above `minimumApproachSpeed`, judged at the
-  position `lookahead` seconds ahead). Clearance subtracts a per-kind radius (head 14 cm for
-  the visor, hand 5, controller 8). Defaults: 45 cm, 0.45 s, 0.35 m/s, so a 2 m/s punch warns
-  from ~1.35 m. Samples more than 0.25 s apart restart a probe's velocity (no teleport punches).
-- **What lights up**: each probe reveals chunks within its radius (head 1.6 m, hands 0.8 m),
-  softening to nothing at twice that, scaled by its alert; rises in ~50 ms, fades over ~0.45 s.
-  `.always` keeps chunks within 4 m of the head at the resting opacity.
+- **Boundaries** are faces classed wall/door/window that stand within ~45° of vertical
+  (`|n.y| < 0.7`). Their triangles are grouped by normal and plane offset in each render
+  chunk, then flattened onto a fitted vertical plane. This keeps the grid straight over the uneven
+  scene mesh while leaving wall coverage and openings from the reconstructed geometry intact.
+  Outlines sit 1.5 cm in front of the surface.
+- **Furniture** is separate: with "Show nearby furniture holograms" enabled (default), nearby
+  hand/controller probes reveal the original obstacle mesh as a translucent violet fill.
+  Furniture never triggers a wall cue and the head does not reveal it.
+- **The wall cue** requires both approach speed and positive acceleration toward the nearest
+  boundary. Proximity and steady motion alone never show the grid. Prediction uses both velocity
+  and measured acceleration. Defaults: a 45 cm safety margin, 0.35 s prediction, 0.75 m/s minimum
+  speed, and 2.5 m/s² minimum acceleration. Below 30 cm, prediction shortens to 0.12 s. A cue
+  stays visible for 0.2 s, then fades; each probe can cue once per swing, with a 0.85 s cooldown.
+  It rearms when the hand/controller slows below 0.2 m/s or moves away. The headset is not watched:
+  visionOS already guards it. Samples more than 0.25 s apart restart a probe's velocity.
+- **What lights up**: a hand/controller reveals wall chunks within 0.8 m, softening to nothing at
+  twice that radius; the cue is rate-limited and fades over ~0.45 s. Nearby furniture holograms
+  fade with distance over a 1.4 m radius.
 - **Feeding it**: an app with its own reconstruction calls `ingest(_:)` / `remove(anchorID:)`
   (spatial-ai-character); one without starts `RAVEGuardianWorldSensor`, which asks for
   `.worldSensing`, so the app needs `NSWorldSensingUsageDescription` (Longwave). Probes are
@@ -249,11 +255,11 @@ classified `MeshAnchor`s, not a drawn boundary.
   RealityKit content is depth-tested against the stream, and a game object nearer than the
   wall must not hide a safety outline. `drawsOverContent: false` restores normal occlusion.
 - `RAVEGuardianDemoRoom` makes a tessellated box room for the simulator (no scene mesh there)
-  and tests; spatial-ai-character's `setGuardian demoRoom=true` uses it. Simulator-verified
-  2026-11-11 (grid and lines render, fade in/out, always mode). **Unverified on device**: the
-  real mesh's wall coverage, the thresholds, hand/controller probes, the cost of a second
-  reconstruction session in Longwave, and whether `readsDepth = false` really draws over the
-  foveated stream.
+  and tests; spatial-ai-character's `setGuardian demoRoom=true` uses it. The base grid and
+  fade were simulator-verified 2026-11-11. **Unverified on device**: the fitted planes, wall
+  coverage on a real mesh, acceleration thresholds, furniture hologram visibility, the cost of
+  Longwave's second reconstruction session, and whether `readsDepth = false` draws over the
+  foveated stream as intended.
 - **Compositor Services hosts** (added the same day for Longwave's Shell A): `RAVEGuardianOverlay`
   runs the map and monitor on the main actor at ~90 Hz (the probes live there) and publishes a
   snapshot to `RAVEGuardianMetalRenderer`, which the host's render thread encodes per eye view after

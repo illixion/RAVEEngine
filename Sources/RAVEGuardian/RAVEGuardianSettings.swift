@@ -12,17 +12,18 @@ import Foundation
 
 public struct RAVEGuardianSettings: Codable, Equatable, Sendable {
 
-    /// When the outline shows.
+    /// Retained for decoding settings written by older releases. The monitor
+    /// now always uses the accelerated hand/controller cue.
     public enum Visibility: String, Codable, CaseIterable, Sendable, Identifiable {
-        /// Only near a wall, or when a tracked part is heading for one fast.
+        /// Legacy value; no longer changes cue visibility.
         case proximity
-        /// The nearby walls always show faintly, brightening near them.
+        /// Legacy value; continuous wall visibility is no longer supported.
         case always
         public var id: String { rawValue }
         public var title: String {
             switch self {
-            case .proximity: "When close"
-            case .always: "Always"
+            case .proximity: "Accelerating hand/controller motion"
+            case .always: "Always (legacy)"
             }
         }
     }
@@ -74,7 +75,13 @@ public struct RAVEGuardianSettings: Codable, Equatable, Sendable {
         public var lineWidth: Float = 0.012
         /// Opacity at full alert, 0...1.
         public var maxOpacity: Float = 0.9
-        /// Opacity of the resting outline in `.always`, 0...1.
+        /// Opacity scale for nearby furniture rendered as a hologram.
+        public var obstacleOpacity: Float = 0.32
+        /// Furniture uses a separate tint so it reads as a hologram, not a
+        /// wall warning.
+        public var obstacleColor: Color = .violet
+        /// Retained for decoding old settings. Continuous wall visibility is
+        /// no longer supported.
         public var restingOpacity: Float = 0.2
         public init() {}
 
@@ -86,23 +93,26 @@ public struct RAVEGuardianSettings: Codable, Equatable, Sendable {
     public var isEnabled: Bool = true
     public var visibility: Visibility = .proximity
 
-    /// The safety margin, metres: inside this distance of a wall the outline
-    /// starts to show, reaching full strength at a quarter of it.
+    /// The safety margin, metres, used to scale an accelerated approach cue.
+    /// Distance alone never makes a wall visible.
     public var warningDistance: Float = 0.45
-    /// Seconds of travel looked ahead: a part moving toward a wall is judged
-    /// by where it will be this long from now, so a fast swing warns earlier
-    /// than a slow lean. Zero turns the speed term off.
-    public var lookahead: Float = 0.45
-    /// Below this approach speed (m/s) the lookahead is ignored, so ordinary
-    /// hand jitter near a wall does not pulse the outline.
-    public var minimumApproachSpeed: Float = 0.35
+    /// Seconds of travel looked ahead after a hand or controller accelerates
+    /// toward a wall.
+    public var lookahead: Float = 0.35
+    /// A fast but steady movement does not retrigger the warning.
+    public var minimumApproachSpeed: Float = 0.75
+    /// The minimum acceleration toward a wall, m/s², that counts as an
+    /// intentional swing rather than tracking noise or a slow reach.
+    public var minimumApproachAcceleration: Float = 2.5
 
-    public var watchesHead: Bool = true
+    /// Kept for saved-settings compatibility. visionOS protects the headset;
+    /// this Guardian watches hands and controllers.
+    public var watchesHead: Bool = false
     public var watchesHands: Bool = true
     public var watchesControllers: Bool = true
-    /// Furniture and other obstacles (tables, shelves, seats) count as well as
-    /// walls, doors and windows.
-    public var includesFurniture: Bool = false
+    /// Nearby furniture is shown as a translucent mesh for spatial context;
+    /// it does not use the wall warning grid or trigger.
+    public var includesFurniture: Bool = true
 
     public var appearance = Appearance()
 
@@ -110,6 +120,8 @@ public struct RAVEGuardianSettings: Codable, Equatable, Sendable {
 
     public static let warningDistanceRange: ClosedRange<Float> = 0.15...1.5
     public static let lookaheadRange: ClosedRange<Float> = 0...1.2
+    public static let approachSpeedRange: ClosedRange<Float> = 0.25...2.0
+    public static let approachAccelerationRange: ClosedRange<Float> = 0.5...8.0
 
     /// Whether this probe kind is watched under these settings.
     public func watches(_ kind: RAVEGuardianProbe.Kind) -> Bool {
@@ -125,15 +137,22 @@ public struct RAVEGuardianSettings: Codable, Equatable, Sendable {
     /// negative margin.
     public func sanitized() -> RAVEGuardianSettings {
         var s = self
+        // Older builds could persist continuous visibility and head warnings.
+        // Both now resolve to the hand/controller-only accelerated cue.
+        s.visibility = .proximity
+        s.watchesHead = false
         s.warningDistance = s.warningDistance.clamped(to: Self.warningDistanceRange)
         s.lookahead = s.lookahead.clamped(to: Self.lookaheadRange)
-        s.minimumApproachSpeed = max(0, s.minimumApproachSpeed)
+        s.minimumApproachSpeed = s.minimumApproachSpeed.clamped(to: Self.approachSpeedRange)
+        s.minimumApproachAcceleration = s.minimumApproachAcceleration.clamped(to: Self.approachAccelerationRange)
         s.appearance.spacing = s.appearance.spacing.clamped(to: Appearance.spacingRange)
         s.appearance.lineWidth = s.appearance.lineWidth.clamped(to: Appearance.lineWidthRange)
         s.appearance.maxOpacity = s.appearance.maxOpacity.clamped(to: 0.1...1)
+        s.appearance.obstacleOpacity = s.appearance.obstacleOpacity.clamped(to: 0.05...0.8)
         s.appearance.restingOpacity = s.appearance.restingOpacity.clamped(to: 0.02...1)
         for c in [\Color.red, \Color.green, \Color.blue] {
             s.appearance.color[keyPath: c] = s.appearance.color[keyPath: c].clamped(to: 0...1)
+            s.appearance.obstacleColor[keyPath: c] = s.appearance.obstacleColor[keyPath: c].clamped(to: 0...1)
         }
         return s
     }
@@ -141,7 +160,7 @@ public struct RAVEGuardianSettings: Codable, Equatable, Sendable {
     // Decoding tolerates missing keys, so a blob saved by an older build
     // keeps the user's choices and picks up defaults for anything new.
     private enum CodingKeys: String, CodingKey {
-        case isEnabled, visibility, warningDistance, lookahead, minimumApproachSpeed
+        case isEnabled, visibility, warningDistance, lookahead, minimumApproachSpeed, minimumApproachAcceleration
         case watchesHead, watchesHands, watchesControllers, includesFurniture, appearance
     }
 
@@ -153,6 +172,7 @@ public struct RAVEGuardianSettings: Codable, Equatable, Sendable {
         warningDistance = try c.decodeIfPresent(Float.self, forKey: .warningDistance) ?? d.warningDistance
         lookahead = try c.decodeIfPresent(Float.self, forKey: .lookahead) ?? d.lookahead
         minimumApproachSpeed = try c.decodeIfPresent(Float.self, forKey: .minimumApproachSpeed) ?? d.minimumApproachSpeed
+        minimumApproachAcceleration = try c.decodeIfPresent(Float.self, forKey: .minimumApproachAcceleration) ?? d.minimumApproachAcceleration
         watchesHead = try c.decodeIfPresent(Bool.self, forKey: .watchesHead) ?? d.watchesHead
         watchesHands = try c.decodeIfPresent(Bool.self, forKey: .watchesHands) ?? d.watchesHands
         watchesControllers = try c.decodeIfPresent(Bool.self, forKey: .watchesControllers) ?? d.watchesControllers
@@ -163,7 +183,7 @@ public struct RAVEGuardianSettings: Codable, Equatable, Sendable {
 
 extension RAVEGuardianSettings.Appearance {
     private enum CodingKeys: String, CodingKey {
-        case style, color, spacing, lineWidth, maxOpacity, restingOpacity
+        case style, color, spacing, lineWidth, maxOpacity, obstacleOpacity, obstacleColor, restingOpacity
     }
 
     public init(from decoder: any Decoder) throws {
@@ -174,13 +194,14 @@ extension RAVEGuardianSettings.Appearance {
         spacing = try c.decodeIfPresent(Float.self, forKey: .spacing) ?? d.spacing
         lineWidth = try c.decodeIfPresent(Float.self, forKey: .lineWidth) ?? d.lineWidth
         maxOpacity = try c.decodeIfPresent(Float.self, forKey: .maxOpacity) ?? d.maxOpacity
+        obstacleOpacity = try c.decodeIfPresent(Float.self, forKey: .obstacleOpacity) ?? d.obstacleOpacity
+        obstacleColor = try c.decodeIfPresent(RAVEGuardianSettings.Color.self, forKey: .obstacleColor) ?? d.obstacleColor
         restingOpacity = try c.decodeIfPresent(Float.self, forKey: .restingOpacity) ?? d.restingOpacity
     }
 }
 
-/// The settings, persisted to `UserDefaults` as JSON under one key. Each app
-/// keeps one store (usually `shared`) and hands it to its guardian, which
-/// picks up changes on the next frame.
+    /// Settings are persisted to `UserDefaults` as one JSON value. Each app
+    /// keeps one store (usually `shared`) and hands it to its guardian.
 @MainActor
 @Observable
 public final class RAVEGuardianSettingsStore {

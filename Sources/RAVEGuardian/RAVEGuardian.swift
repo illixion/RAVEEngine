@@ -1,20 +1,19 @@
 /*
  RAVE Engine — the guardian itself: a RealityKit root an app adds to its
- immersive content, which draws the room's walls as a tinted grid wherever a
- tracked part is close to one or heading for one fast.
+ immersive content. Walls show as a short grid cue only when a hand or
+ controller accelerates toward them; nearby furniture uses a separate
+ translucent mesh.
 
  Wiring, in an app's RealityView:
 
      let guardian = RAVEGuardian()                       // settings: .shared store
      content.add(guardian.root)
-     guardian.probeSource = { [sensor] in               // head, hands, controllers
-         [sensor.headProbe()].compactMap { $0 } + handProbes()
-     }
+     guardian.probeSource = { handAndControllerProbes() }
      sensor.start(feeding: guardian)                     // or guardian.ingest(meshAnchor)
 
  Each frame (a RealityKit System, so it runs in step with rendering) it reads
- the probes, asks `RAVEGuardianMonitor` how strongly each wall chunk should
- show, rebuilds the chunks whose mesh changed and sets their opacity. Mesh
+ the probes, asks `RAVEGuardianMonitor` which boundary cue or furniture
+ hologram should show, rebuilds the chunks whose mesh changed and sets their opacity. Mesh
  extraction from a `MeshAnchor` runs off the main actor; the newest update per
  anchor wins.
 
@@ -62,8 +61,10 @@ public final class RAVEGuardian: RAVEGuardianMeshSink {
     private var entities: [RAVEGuardianChunkID: ModelEntity] = [:]
     private var builtRevision: [RAVEGuardianChunkID: Int] = [:]
     private var builtSpacing: Float?
-    private var materialKey: MaterialKey?
-    private var material: UnlitMaterial?
+    private var wallMaterialKey: MaterialKey?
+    private var obstacleMaterialKey: MaterialKey?
+    private var wallMaterial: UnlitMaterial?
+    private var obstacleMaterial: UnlitMaterial?
 
     private struct MaterialKey: Equatable {
         var style: RAVEGuardianSettings.Style
@@ -179,18 +180,32 @@ public final class RAVEGuardian: RAVEGuardianMeshSink {
         descriptor.textureCoordinates = MeshBuffers.TextureCoordinates(layout.uvs)
         descriptor.primitives = .triangles(layout.indices)
         guard let mesh = try? MeshResource.generate(from: [descriptor]) else { return }
-        entity.model = ModelComponent(mesh: mesh, materials: material.map { [$0] } ?? [])
+        let surfaceMaterial = chunk.id.isObstacle ? obstacleMaterial : wallMaterial
+        entity.model = ModelComponent(mesh: mesh, materials: surfaceMaterial.map { [$0] } ?? [])
     }
 
     private func updateMaterial(_ appearance: RAVEGuardianSettings.Appearance) {
-        let key = MaterialKey(style: appearance.style, color: appearance.color,
-                              lineFraction: appearance.lineWidth / appearance.spacing)
-        guard key != materialKey else { return }
-        materialKey = key
-        guard let material = Self.material(for: key, overContent: drawsOverContent) else { return }
-        self.material = material
-        for entity in entities.values where entity.model != nil {
-            entity.model?.materials = [material]
+        let wallKey = MaterialKey(style: appearance.style, color: appearance.color,
+                                  lineFraction: appearance.lineWidth / appearance.spacing)
+        let obstacleKey = MaterialKey(style: .solid, color: appearance.obstacleColor,
+                                      lineFraction: appearance.lineWidth / appearance.spacing)
+        var changed = false
+        if wallKey != wallMaterialKey,
+           let material = Self.material(for: wallKey, overContent: drawsOverContent) {
+            wallMaterialKey = wallKey
+            wallMaterial = material
+            changed = true
+        }
+        if obstacleKey != obstacleMaterialKey,
+           let material = Self.material(for: obstacleKey, overContent: drawsOverContent) {
+            obstacleMaterialKey = obstacleKey
+            obstacleMaterial = material
+            changed = true
+        }
+        guard changed else { return }
+        for (id, entity) in entities where entity.model != nil {
+            let material = id.isObstacle ? obstacleMaterial : wallMaterial
+            if let material { entity.model?.materials = [material] }
         }
     }
 
