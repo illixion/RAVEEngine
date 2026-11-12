@@ -1,13 +1,13 @@
 /*
  RAVE Engine — where the elbow is, when the tracker cannot be trusted to say.
 
- ARKit's elbow end of the forearm (`forearmArm`) is tracked on about a third
- of the frames with the arm held up, flickers in and out, and wanders while
- the other hand covers the forearm, still reported as tracked (Vision Pro,
- 2026-11-12). A sleeve built straight on it is choppy and slides about under a
- pressing finger. The owner's call: do not trust that bone much; use it only
- when it looks stable, otherwise work the arm out from the hand, the way VR
- body rigs do (Boneworks is the model).
+ ARKit's elbow end of the forearm (`forearmArm`) always has a pose while the
+ hand is tracked, and it is usually right, raised elbow included (LambdaVision
+ relies on it). But it is an estimate on most frames, and it wanders while
+ the other hand covers the forearm (Vision Pro, 2026-11-12): a sleeve built
+ straight on it slides about under a pressing finger. The owner's call: use
+ the bone when it looks stable, otherwise work the arm out from the hand, the
+ way VR body rigs do (Boneworks is the model).
 
  So the elbow comes from a body model first:
 
