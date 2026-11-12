@@ -45,4 +45,62 @@ public extension RAVESleeveArm {
     }
 }
 
+/// Reads a sleeve's arm from hand anchors and remembers where the elbow is.
+///
+/// ARKit tracks the elbow end of the forearm (`forearmArm`) only part of the
+/// time: about a third of the frames with the arm held up to look at, measured
+/// on a Vision Pro 2026-11-12. Estimating the arm from the fingers instead
+/// makes the sleeve swing with every bend of the wrist. So while the elbow is
+/// tracked, this learns where it sits in the `forearmWrist` joint's own frame
+/// (a direction and a length, per arm), and uses that while it is not: the
+/// joint turns with the forearm, not with the hand. Which local axis that is
+/// is measured, not assumed, so it does not depend on ARKit's joint
+/// conventions.
+public struct RAVESleeveArmSampler: Sendable {
+    private struct Elbow: Sendable {
+        var direction: SIMD3<Float>
+        var length: Float
+    }
+
+    private var left: Elbow?
+    private var right: Elbow?
+
+    public init() {}
+
+    /// Whether the elbow of that arm has been seen yet.
+    public func hasLearnedElbow(_ side: RAVESleeveSide) -> Bool {
+        (side == .left ? left : right) != nil
+    }
+
+    /// The arm of a hand anchor, with a remembered elbow while ARKit does not
+    /// track it. Nil as for `RAVESleeveArm.init(_:)`.
+    public mutating func arm(_ anchor: HandAnchor) -> RAVESleeveArm? {
+        guard var arm = RAVESleeveArm(anchor), let skeleton = anchor.handSkeleton else { return nil }
+        let joint = skeleton.joint(.forearmWrist)
+        guard joint.isTracked else { return arm }
+        let world = anchor.originFromAnchorTransform * joint.anchorFromJointTransform
+        var learned = arm.side == .left ? left : right
+        if let elbow = arm.elbow {
+            let local = world.inverse * SIMD4(elbow, 1)
+            let offset = SIMD3(local.x, local.y, local.z)
+            let length = simd_length(offset)
+            if length > 0.12, length < 0.45 {
+                let direction = offset / length
+                if let known = learned {
+                    // Settle over about a second of tracked frames.
+                    learned = Elbow(direction: simd_normalize(known.direction + (direction - known.direction) * 0.03),
+                                    length: known.length + (length - known.length) * 0.03)
+                } else {
+                    learned = Elbow(direction: direction, length: length)
+                }
+            }
+        } else if let known = learned {
+            let p = world * SIMD4(known.direction * known.length, 1)
+            arm.elbow = SIMD3(p.x, p.y, p.z)
+        }
+        if arm.side == .left { left = learned } else { right = learned }
+        return arm
+    }
+}
+
 #endif
