@@ -62,10 +62,7 @@ public struct RAVESleeveArm: Sendable, Equatable {
 
 public extension RAVESleeveArm {
     /// The arm in another space: points through `matrix`, directions through
-    /// its rotation. A host that parents its tiles to the system's own wrist
-    /// anchor runs the sleeve in that joint's space (`matrix` is the joint's
-    /// inverse), so the system moves the tiles with the arm at render time
-    /// and only what changes relative to the wrist goes through the app.
+    /// its rotation.
     func transformed(by matrix: simd_float4x4) -> RAVESleeveArm {
         func point(_ p: SIMD3<Float>) -> SIMD3<Float> {
             let q = matrix * SIMD4(p, 1)
@@ -81,33 +78,6 @@ public extension RAVESleeveArm {
                                                 palmNormalOut: direction(palm.palmNormalOut),
                                                 fingersDirection: direction(palm.fingersDirection)),
                              elbowBack: elbowBack.map(direction))
-    }
-}
-
-public extension RAVESleeveArm {
-    /// The arm squared to the axes of the space it is in: the wrist at the
-    /// origin, the forearm along whichever axis it runs nearest, the back of
-    /// the hand out of whichever axis it faces nearest.
-    ///
-    /// For an arm expressed in its own wrist joint's space, where that is
-    /// what it nearly is anyway (measured on a Vision Pro, 2026-11-12: within
-    /// a few degrees). A sleeve built on the squared arm does not move in
-    /// that space at all, so tiles hung off the system's anchor for the joint
-    /// are placed once and the system does the rest: nothing the app measures
-    /// each frame can shake them. Nil when the two fall on the same axis.
-    func squaredToAxes(length: Float = RAVESleeveFrame.defaultLength) -> RAVESleeveArm? {
-        func snap(_ v: SIMD3<Float>) -> SIMD3<Float> {
-            let a = abs(v)
-            if a.x >= a.y, a.x >= a.z { return SIMD3(v.x < 0 ? -1 : 1, 0, 0) }
-            if a.y >= a.z { return SIMD3(0, v.y < 0 ? -1 : 1, 0) }
-            return SIMD3(0, 0, v.z < 0 ? -1 : 1)
-        }
-        let along = snap(elbow.map { $0 - wrist } ?? -palm.fingersDirection)
-        let back = snap(-palm.palmNormalOut - along * simd_dot(-palm.palmNormalOut, along))
-        guard abs(simd_dot(along, back)) < 0.5 else { return nil }
-        return RAVESleeveArm(side: side, wrist: .zero, elbow: along * length,
-                             palm: RAVEPalmPose(position: -along * 0.05, palmNormalOut: -back,
-                                                fingersDirection: -along))
     }
 }
 

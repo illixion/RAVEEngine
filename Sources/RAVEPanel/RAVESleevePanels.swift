@@ -99,11 +99,17 @@ public final class RAVESleevePanels {
     /// An app that poses tiles from ARKit each frame is always a few frames
     /// behind the arm: worn on a Vision Pro (2026-11-12) the sleeve trailed
     /// far enough for a rising arm to cover it. The system moves an anchored
-    /// entity itself, at render time, with a predicted pose. So the host
-    /// runs the sleeve in the wrist joint's space
-    /// (`RAVESleeveArm.transformed(by:)` with the inverse of
-    /// `wristJointTransform`) and the snapshots it applies are in that space
-    /// too; only what moves relative to the wrist is then the app's to follow.
+    /// entity itself, at render time. So each tile is given its place
+    /// *relative to the joint as the app last saw it* (`apply`'s
+    /// `anchorFrame`), and the system carries it the rest of the way.
+    ///
+    /// The sleeve itself still runs in the world, from positions. That is
+    /// deliberate, twice over. A joint's orientation is noisy, and a tile
+    /// fixed in the joint's frame shows that noise at the end of a lever
+    /// (tried: it shook on a still arm); placed from world positions, the
+    /// noise in the app's reading of the joint and in the system's cancel.
+    /// And a sleeve held still in the world while a finger covers the arm
+    /// stays still, whatever the hidden joint is reported to be doing.
     /// The simulator has no hands, so a simulated arm stays in the world.
     public func anchor(to side: RAVESleeveSide?) {
         guard side != anchoredSide else { return }
@@ -170,8 +176,13 @@ public final class RAVESleevePanels {
         radialModel.released = { [weak self] in self?.onRadialRelease?() }
     }
 
-    /// Show a snapshot: once a frame, after `RAVESleeve.update`.
-    public func apply(_ snapshot: RAVESleeveSnapshot) {
+    /// Show a snapshot (in world space): once a frame, after
+    /// `RAVESleeve.update`. While anchored, `anchorFrame` is the joint's
+    /// frame in the world as RealityKit has it, from the same hand sample the
+    /// snapshot came from; without one the tiles keep their last place on
+    /// the anchor (the hand is lost and they are fading).
+    public func apply(_ snapshot: RAVESleeveSnapshot, anchorFrame: simd_float4x4? = nil) {
+        let toContainer = anchoredSide == nil ? matrix_identity_float4x4 : anchorFrame?.inverse
         var live = Set<String>()
         for placed in snapshot.tiles {
             let id = placed.tile.id
@@ -186,10 +197,13 @@ public final class RAVESleevePanels {
             // Anchored to the wrist a tile's transform barely changes, and
             // re-sending five attachments' transforms and opacities every
             // frame is work for a renderer that is already short of time.
-            if item.settling > 0 || item.transform.map({ !Self.close($0, placed.transform) }) ?? true {
-                item.holder.setTransformMatrix(placed.transform, relativeTo: container)
-                item.transform = placed.transform
-                item.settling = max(0, item.settling - 1)
+            if let toContainer {
+                let local = toContainer * placed.transform
+                if item.settling > 0 || item.transform.map({ !Self.close($0, local) }) ?? true {
+                    item.holder.setTransformMatrix(local, relativeTo: container)
+                    item.transform = local
+                    item.settling = max(0, item.settling - 1)
+                }
             }
             if abs(item.opacity - placed.opacity) > 0.004 {
                 // Fully shown, a tile carries no opacity component: one at 1
@@ -215,7 +229,7 @@ public final class RAVESleevePanels {
             if radialModel.geometry != view.geometry { radialModel.geometry = view.geometry }
             if radialModel.armedLabel != view.armedLabel { radialModel.armedLabel = view.armedLabel }
             holder.isEnabled = true
-            holder.setTransformMatrix(view.transform, relativeTo: container)
+            if let toContainer { holder.setTransformMatrix(toContainer * view.transform, relativeTo: container) }
             if let content = holder.children.first { Self.fit(content, width: view.geometry.memberOuter * 2) }
         } else if radialHolder?.isEnabled == true {
             radialHolder?.isEnabled = false
@@ -295,28 +309,22 @@ public final class RAVESleeveHost {
         panels.onRadialRelease = { [weak self] in self?.sleeve.radialRelease(now: CACurrentMediaTime()) }
     }
 
-    /// One frame. `arm` is the arm the sleeve is on, `fingertip` the other
-    /// hand's index tip, `head` the eye point. Returns what the wearer did.
+    /// One frame, in world space. `arm` is the arm the sleeve is on,
+    /// `fingertip` the other hand's index tip, `head` the eye point. Returns
+    /// what the wearer did.
     ///
-    /// With `anchored`, all three are in the worn arm's wrist-joint space and
-    /// the tiles hang off the system's anchor for it (`RAVESleevePanels
-    /// .anchor(to:)`); without, they are in the world. The snapshot is in
-    /// whichever space the inputs were.
+    /// With `anchorFrame` (the worn arm's wrist joint in the world, as
+    /// RealityKit frames it), the tiles hang off the system's anchor for
+    /// that joint and follow the arm at render time; see
+    /// `RAVESleevePanels.anchor(to:)`. Without, they are posed in the world.
     @discardableResult
     public func update(arm: RAVESleeveArm?, head: SIMD3<Float>, fingertip: SIMD3<Float>?,
                        now: TimeInterval = CACurrentMediaTime(), showAllowed: Bool = true,
-                       anchored: Bool = false) -> [RAVESleeveEvent] {
-        if let arm {
-            let side: RAVESleeveSide? = anchored ? arm.side : nil
-            if side != panels.anchoredSide {
-                // A different space: the filters start afresh in it.
-                sleeve.follower.reset()
-                panels.anchor(to: side)
-            }
-        }
+                       anchorFrame: simd_float4x4? = nil) -> [RAVESleeveEvent] {
+        if let arm { panels.anchor(to: anchorFrame == nil ? nil : arm.side) }
         let frame = sleeve.update(arm: arm, head: head, now: now, showAllowed: showAllowed)
         sleeve.touch(fingertip: fingertip, now: now)
-        panels.apply(frame)
+        panels.apply(frame, anchorFrame: anchorFrame)
         snapshot = frame
         return sleeve.takeEvents()
     }

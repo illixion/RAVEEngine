@@ -63,6 +63,10 @@ public struct RAVESleeveArmEstimator: Sendable {
 
     /// Whether the tracked bone is being used this frame.
     public private(set) var isTrustingBone = false
+    /// The shoulder the last solve hung the arm from. For a visualizer.
+    public private(set) var shoulder: SIMD3<Float>?
+    /// The model's own elbow last frame, before the bone's correction.
+    public private(set) var modelElbow: SIMD3<Float>?
     /// The forearm's length as measured so far.
     public private(set) var forearmLength: Float
 
@@ -145,6 +149,9 @@ public struct RAVESleeveArmEstimator: Sendable {
         let hint = SIMD3<Float>(0, -1, 0) + right * (arm.side == .right ? tuning.elbowOut : -tuning.elbowOut)
         let model = Self.elbow(shoulder: shoulder, wrist: arm.wrist, upperArm: tuning.upperArm,
                                forearm: forearmLength, hint: hint)
+
+        self.shoulder = shoulder
+        modelElbow = model
 
         // Does the tracked bone look stable?
         var stable = false

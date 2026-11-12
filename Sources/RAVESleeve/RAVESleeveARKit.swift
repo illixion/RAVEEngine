@@ -40,9 +40,11 @@ public extension RAVESleeveArm {
                   wrist: position(.forearmWrist), elbow: position(.forearmArm), palm: palm)
     }
 
-    /// The `forearmWrist` joint's transform in the world: the space a host
-    /// runs the sleeve in when its tiles hang off RealityKit's anchor for the
-    /// same joint (`RAVESleevePanels.anchor(to:)`).
+    /// The `forearmWrist` joint's transform in the world, for a host whose
+    /// tiles hang off RealityKit's anchor for the same joint
+    /// (`RAVESleeveHost.update(…anchorFrame:)`). RealityKit's frame for the
+    /// joint is not this one: on a left arm it is this turned half way about
+    /// its x axis (worn 2026-11-12); a right arm is unchecked.
     nonisolated static func wristJointTransform(_ anchor: HandAnchor) -> simd_float4x4? {
         guard anchor.isTracked, let joint = anchor.handSkeleton?.joint(.forearmWrist) else { return nil }
         return anchor.originFromAnchorTransform * joint.anchorFromJointTransform
